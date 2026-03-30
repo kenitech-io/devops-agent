@@ -53,6 +53,22 @@ https://github.com/kenitech-io/devops-agent/issues/1
 - Test end-to-end before calling anything done
 - Use Go idioms: error handling, interfaces, table-driven tests
 
+## Local paths
+
+All work runs from the Google Drive tech department directory. Repo clones are at:
+
+- This repo: ~/projects/keni/devops-agent
+- devops-keni: ~/projects/keni/devops-keni
+- devops-infra: ~/projects/keni/devops-infra
+- devops-docs: ~/projects/keni/devops-docs
+- devops-monitoring: ~/projects/keni/devops-monitoring
+- devops-cd: ~/projects/keni/devops-cd
+- devops-ci: ~/projects/keni/devops-ci
+- devops-tools: ~/projects/keni/devops-tools
+- devops-iac: ~/projects/keni/devops-iac
+- devops-secrets: ~/projects/keni/devops-secrets
+- devops-backup-tools: ~/projects/keni/devops-backup-tools
+
 ## Related repos
 
 - devops-keni: the dashboard this agent connects to
