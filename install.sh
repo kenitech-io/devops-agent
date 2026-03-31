@@ -275,16 +275,40 @@ main() {
     log "Starting Keni Agent installation"
     log "Dashboard: ${DASHBOARD_URL}"
 
+    # Check if agent is already registered (config.yml exists from a previous install)
+    ALREADY_REGISTERED=false
+    if [ -f "${CONFIG_DIR}/config.yml" ]; then
+        ALREADY_REGISTERED=true
+        log "Agent already registered, skipping config setup. To re-register, run uninstall.sh first."
+    fi
+
     install_wireguard
     install_binary
-    setup_config
+
+    if [ "$ALREADY_REGISTERED" = "false" ]; then
+        setup_config
+    fi
+
     setup_ssh_access
     install_service
-    start_agent
+
+    if [ "$ALREADY_REGISTERED" = "true" ]; then
+        # Agent was already running, just ensure the service is active
+        if systemctl is-active --quiet keni-agent; then
+            log "keni-agent is already running"
+        else
+            systemctl start keni-agent
+            log "keni-agent started"
+        fi
+    else
+        start_agent
+    fi
 
     log ""
     log "Installation complete."
-    log "The agent will register with the dashboard on first start."
+    if [ "$ALREADY_REGISTERED" = "false" ]; then
+        log "The agent will register with the dashboard on first start."
+    fi
     log "Check status: systemctl status keni-agent"
     log "View logs:    journalctl -u keni-agent -f"
 }

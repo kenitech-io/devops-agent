@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,10 @@ import (
 
 // minDiskSpaceBytes is the minimum free disk space required for an update (100 MB).
 const minDiskSpaceBytes = 100 * 1024 * 1024
+
+// UpdateMarkerPath is the file whose existence indicates an update is in progress.
+// Used by startup recovery to detect incomplete updates.
+const UpdateMarkerPath = "/etc/keni-agent/update-in-progress"
 
 // HealthCheckURL is the local health endpoint used to verify the agent after update.
 var HealthCheckURL = "http://127.0.0.1:9100/healthz"
@@ -33,8 +38,15 @@ var restartFunc = restartSystemd
 // executableFunc returns the path of the current executable. Override in tests.
 var executableFunc = os.Executable
 
+// AllowedHosts is the list of hosts permitted for update downloads.
+// Extend this slice to allow additional sources.
+var AllowedHosts = []string{"github.com", "dashboard.kenitech.io"}
+
 // preflightFunc is the function called before update. Override in tests.
 var preflightFunc = preflightChecks
+
+// markerPathOverride allows tests to use a temp path instead of UpdateMarkerPath.
+var markerPathOverride string
 
 // preflightChecks verifies the system is ready for a self-update:
 // sufficient disk space, writable binary path, and systemctl available.
@@ -73,6 +85,67 @@ func preflightChecks() error {
 	return nil
 }
 
+// isDevMode returns true when KENI_SKIP_WIREGUARD=true (local development).
+func isDevMode() bool {
+	return os.Getenv("KENI_SKIP_WIREGUARD") == "true"
+}
+
+// ValidateDownloadURL checks that the given URL is safe for downloading an update.
+// It enforces HTTPS (unless dev mode), and only allows hosts in AllowedHosts,
+// hosts matching *.kenitech.io, or github.com/kenitech-io/ paths.
+// In dev mode, localhost and 127.0.0.1 are also permitted over HTTP.
+func ValidateDownloadURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid download URL: %w", err)
+	}
+
+	dev := isDevMode()
+	host := strings.ToLower(parsed.Hostname())
+
+	// Scheme check: require https unless dev mode
+	switch parsed.Scheme {
+	case "https":
+		// always allowed
+	case "http":
+		if !dev {
+			return fmt.Errorf("download URL requires https, got http (set KENI_SKIP_WIREGUARD=true for dev mode)")
+		}
+	default:
+		return fmt.Errorf("unsupported URL scheme: %s", parsed.Scheme)
+	}
+
+	// In dev mode, allow localhost / 127.0.0.1
+	if dev && (host == "localhost" || host == "127.0.0.1") {
+		return nil
+	}
+
+	// Reject localhost / 127.0.0.1 in prod
+	if host == "localhost" || host == "127.0.0.1" {
+		return fmt.Errorf("download from %s is only allowed in dev mode (KENI_SKIP_WIREGUARD=true)", host)
+	}
+
+	// Check AllowedHosts exact match
+	for _, allowed := range AllowedHosts {
+		if host == strings.ToLower(allowed) {
+			// For github.com, also require the kenitech-io org path
+			if host == "github.com" {
+				if !strings.HasPrefix(parsed.Path, "/kenitech-io/") {
+					return fmt.Errorf("github.com downloads must be from /kenitech-io/, got path: %s", parsed.Path)
+				}
+			}
+			return nil
+		}
+	}
+
+	// Check *.kenitech.io wildcard
+	if strings.HasSuffix(host, ".kenitech.io") {
+		return nil
+	}
+
+	return fmt.Errorf("download host %q is not in the allowed list", host)
+}
+
 // Update downloads a new agent binary, verifies its checksum, replaces the
 // current binary with rollback support, and restarts via systemd.
 func Update(downloadURL, expectedChecksum string) error {
@@ -80,11 +153,23 @@ func Update(downloadURL, expectedChecksum string) error {
 		return err
 	}
 
+	// Validate the download URL before proceeding
+	if err := ValidateDownloadURL(downloadURL); err != nil {
+		return fmt.Errorf("download URL rejected: %w", err)
+	}
+
 	slog.Info("starting self-update", "url", downloadURL)
 
-	// Download to a temp file
-	tmpPath := "/tmp/keni-agent-update"
+	// Get path of current binary first, so download goes to the same partition
+	currentPath, err := executableFunc()
+	if err != nil {
+		return fmt.Errorf("getting current executable path: %w", err)
+	}
+
+	// Download next to the current binary (same filesystem for atomic rename)
+	tmpPath := currentPath + ".download"
 	if err := downloadBinary(downloadURL, tmpPath); err != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("downloading binary: %w", err)
 	}
 	defer os.Remove(tmpPath)
@@ -94,15 +179,21 @@ func Update(downloadURL, expectedChecksum string) error {
 		return fmt.Errorf("checksum verification failed: %w", err)
 	}
 
-	// Get path of current binary
-	currentPath, err := executableFunc()
-	if err != nil {
-		return fmt.Errorf("getting current executable path: %w", err)
+	// Write marker file to indicate update is in progress.
+	// Startup recovery uses this to detect incomplete updates.
+	markerPath := UpdateMarkerPath
+	if markerOverride := markerPathOverride; markerOverride != "" {
+		markerPath = markerOverride
+	}
+	if err := os.WriteFile(markerPath, []byte(""), 0600); err != nil {
+		slog.Warn("could not write update marker file", "error", err)
+		// Continue anyway; marker is a best-effort safety net.
 	}
 
 	// Back up the current binary for rollback
 	prevPath := currentPath + ".prev"
 	if err := backupBinary(currentPath, prevPath); err != nil {
+		os.Remove(markerPath)
 		return fmt.Errorf("backing up current binary: %w", err)
 	}
 	slog.Info("backed up current binary", "path", prevPath)
@@ -114,6 +205,7 @@ func Update(downloadURL, expectedChecksum string) error {
 		if restoreErr != nil {
 			slog.Error("failed to restore backup after replace failure", "error", restoreErr)
 		}
+		os.Remove(markerPath)
 		return fmt.Errorf("replacing binary: %w", err)
 	}
 
@@ -125,6 +217,7 @@ func Update(downloadURL, expectedChecksum string) error {
 		if rollbackErr := rollback(prevPath, currentPath); rollbackErr != nil {
 			slog.Error("rollback failed", "error", rollbackErr)
 		}
+		os.Remove(markerPath)
 		return fmt.Errorf("restarting service: %w", err)
 	}
 
@@ -136,6 +229,7 @@ func Update(downloadURL, expectedChecksum string) error {
 	healthURL := HealthCheckURL
 	healthTimeout := HealthCheckTimeout
 	healthInterval := HealthCheckInterval
+	markerForGoroutine := markerPath
 	go func() {
 		if err := waitForHealthy(healthURL, healthTimeout, healthInterval); err != nil {
 			slog.Error("post-update health check failed, rolling back", "error", err)
@@ -143,10 +237,12 @@ func Update(downloadURL, expectedChecksum string) error {
 				slog.Error("rollback after health check failure failed", "error", rollbackErr)
 				return
 			}
+			os.Remove(markerForGoroutine)
 			restartFn()
 		} else {
 			slog.Info("post-update health check passed, removing backup")
 			os.Remove(prevPath)
+			os.Remove(markerForGoroutine)
 		}
 	}()
 

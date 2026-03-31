@@ -26,6 +26,48 @@ import (
 
 var version = "dev"
 
+// checkUpdateRecovery detects incomplete self-updates by looking for a .prev
+// binary alongside an update-in-progress marker file. If both exist, the
+// previous update crashed before completing: restore the old binary and re-exec.
+func checkUpdateRecovery() {
+	currentPath, err := os.Executable()
+	if err != nil {
+		slog.Warn("cannot determine executable path for update recovery", "error", err)
+		return
+	}
+
+	prevPath := currentPath + ".prev"
+	markerPath := update.UpdateMarkerPath
+
+	// Both files must exist to trigger recovery
+	if _, err := os.Stat(prevPath); os.IsNotExist(err) {
+		return
+	}
+	if _, err := os.Stat(markerPath); os.IsNotExist(err) {
+		return
+	}
+
+	slog.Warn("detected incomplete update, rolling back to previous binary",
+		"current", currentPath, "prev", prevPath)
+
+	// Restore the previous binary over the current one
+	if err := os.Rename(prevPath, currentPath); err != nil {
+		slog.Error("rollback rename failed", "error", err)
+		return
+	}
+
+	// Remove the marker so the restored binary does not loop
+	os.Remove(markerPath)
+
+	slog.Info("rollback complete, re-executing restored binary")
+
+	// Re-exec the restored binary with the same arguments
+	if err := syscall.Exec(currentPath, os.Args, os.Environ()); err != nil {
+		slog.Error("re-exec after rollback failed", "error", err)
+		os.Exit(1)
+	}
+}
+
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("keni-agent %s\n", version)
@@ -34,6 +76,8 @@ func main() {
 
 	logging.Init()
 	slog.Info("keni-agent starting", "version", version)
+
+	checkUpdateRecovery()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

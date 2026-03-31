@@ -129,6 +129,9 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		return fmt.Errorf("dialing %s: %w", url, err)
 	}
 
+	// Limit incoming message size to 16 MB to prevent DoS via oversized messages.
+	conn.SetReadLimit(16 * 1024 * 1024)
+
 	c.connMu.Lock()
 	c.conn = conn
 	c.connMu.Unlock()
@@ -165,13 +168,20 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		errCh <- c.writeLoop(ctx, conn, closeCh)
 	}()
 
+	var firstErr error
 	select {
-	case err := <-errCh:
-		return err
+	case firstErr = <-errCh:
+		// One goroutine errored. Close the connection to unblock the other.
+		conn.Close()
 	case <-ctx.Done():
 		close(closeCh)
-		return ctx.Err()
+		conn.Close()
+		firstErr = ctx.Err()
 	}
+
+	// Wait for the second goroutine to exit to prevent leaks.
+	<-errCh
+	return firstErr
 }
 
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {

@@ -682,12 +682,14 @@ func setupUpdateTest(t *testing.T, currentBinaryContent string, bgWait time.Dura
 	origURL := HealthCheckURL
 	origTimeout := HealthCheckTimeout
 	origInterval := HealthCheckInterval
+	origMarker := markerPathOverride
 
 	executableFunc = func() (string, error) { return currentPath, nil }
 	restartFunc = func() error { return nil }
 	preflightFunc = func() error { return nil }
 	HealthCheckTimeout = 500 * time.Millisecond
 	HealthCheckInterval = 50 * time.Millisecond
+	markerPathOverride = tmpDir + "/update-in-progress"
 
 	cleanup = func() {
 		// Wait for the background goroutine in Update() to finish
@@ -699,11 +701,13 @@ func setupUpdateTest(t *testing.T, currentBinaryContent string, bgWait time.Dura
 		HealthCheckURL = origURL
 		HealthCheckTimeout = origTimeout
 		HealthCheckInterval = origInterval
+		markerPathOverride = origMarker
 	}
 	return currentPath, cleanup
 }
 
 func TestUpdate_FullFlow(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 	// Serve a "new binary" with known checksum
 	newContent := []byte("new agent binary v2")
 	hash := sha256.Sum256(newContent)
@@ -741,6 +745,7 @@ func TestUpdate_FullFlow(t *testing.T) {
 }
 
 func TestUpdate_BadChecksum(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("binary data"))
 	}))
@@ -762,6 +767,7 @@ func TestUpdate_BadChecksum(t *testing.T) {
 }
 
 func TestUpdate_DownloadFailure(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 	_, cleanup := setupUpdateTest(t, "old binary", 0)
 	defer cleanup()
 
@@ -772,6 +778,7 @@ func TestUpdate_DownloadFailure(t *testing.T) {
 }
 
 func TestUpdate_HealthCheckFailureTriggersRollback(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 	newContent := []byte("new binary for health test")
 	hash := sha256.Sum256(newContent)
 	checksum := "sha256:" + hex.EncodeToString(hash[:])
@@ -820,6 +827,7 @@ func TestUpdate_HealthCheckFailureTriggersRollback(t *testing.T) {
 }
 
 func TestUpdate_RestartFailure(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 	newContent := []byte("new binary for restart test")
 	hash := sha256.Sum256(newContent)
 	checksum := "sha256:" + hex.EncodeToString(hash[:])
@@ -849,6 +857,7 @@ func TestUpdate_RestartFailure(t *testing.T) {
 }
 
 func TestUpdate_ReplaceFailure(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 	newContent := []byte("new binary for replace fail test")
 	hash := sha256.Sum256(newContent)
 	checksum := "sha256:" + hex.EncodeToString(hash[:])
@@ -878,6 +887,197 @@ func TestUpdate_ReplaceFailure(t *testing.T) {
 	}
 }
 
+func TestValidateDownloadURL(t *testing.T) {
+	// Save and restore AllowedHosts
+	origHosts := AllowedHosts
+	defer func() { AllowedHosts = origHosts }()
+	AllowedHosts = []string{"github.com", "dashboard.kenitech.io"}
+
+	tests := []struct {
+		name    string
+		url     string
+		devMode bool
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "valid github release URL",
+			url:     "https://github.com/kenitech-io/devops-agent/releases/download/v1.0.0/keni-agent-linux-arm64",
+			devMode: false,
+			wantErr: false,
+		},
+		{
+			name:    "valid kenitech dashboard URL",
+			url:     "https://dashboard.kenitech.io/api/v1/agents/binary/latest",
+			devMode: false,
+			wantErr: false,
+		},
+		{
+			name:    "valid wildcard kenitech subdomain",
+			url:     "https://updates.kenitech.io/agent/v2.0.0",
+			devMode: false,
+			wantErr: false,
+		},
+		{
+			name:    "http rejected in prod",
+			url:     "http://dashboard.kenitech.io/agent",
+			devMode: false,
+			wantErr: true,
+			errMsg:  "requires https",
+		},
+		{
+			name:    "http allowed in dev mode",
+			url:     "http://dashboard.kenitech.io/agent",
+			devMode: true,
+			wantErr: false,
+		},
+		{
+			name:    "random domain rejected",
+			url:     "https://evil.example.com/malware",
+			devMode: false,
+			wantErr: true,
+			errMsg:  "not in the allowed list",
+		},
+		{
+			name:    "localhost rejected in prod",
+			url:     "http://localhost:8080/agent",
+			devMode: false,
+			wantErr: true,
+			errMsg:  "requires https",
+		},
+		{
+			name:    "localhost https rejected in prod",
+			url:     "https://localhost:8080/agent",
+			devMode: false,
+			wantErr: true,
+			errMsg:  "only allowed in dev mode",
+		},
+		{
+			name:    "localhost allowed in dev mode",
+			url:     "http://localhost:8080/agent",
+			devMode: true,
+			wantErr: false,
+		},
+		{
+			name:    "127.0.0.1 allowed in dev mode",
+			url:     "http://127.0.0.1:9090/binary",
+			devMode: true,
+			wantErr: false,
+		},
+		{
+			name:    "127.0.0.1 rejected in prod",
+			url:     "https://127.0.0.1:9090/binary",
+			devMode: false,
+			wantErr: true,
+			errMsg:  "only allowed in dev mode",
+		},
+		{
+			name:    "github.com wrong org rejected",
+			url:     "https://github.com/evil-org/malware/releases/download/v1/binary",
+			devMode: false,
+			wantErr: true,
+			errMsg:  "kenitech-io",
+		},
+		{
+			name:    "ftp scheme rejected",
+			url:     "ftp://dashboard.kenitech.io/agent",
+			devMode: false,
+			wantErr: true,
+			errMsg:  "unsupported URL scheme",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.devMode {
+				t.Setenv("KENI_SKIP_WIREGUARD", "true")
+			} else {
+				t.Setenv("KENI_SKIP_WIREGUARD", "")
+			}
+
+			err := ValidateDownloadURL(tt.url)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error containing %q, got nil", tt.errMsg)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("expected no error, got: %v", err)
+			}
+			if tt.wantErr && err != nil && tt.errMsg != "" {
+				if !contains(err.Error(), tt.errMsg) {
+					t.Errorf("expected error containing %q, got: %v", tt.errMsg, err)
+				}
+			}
+		})
+	}
+}
+
+func TestUpdate_DownloadPathRelativeToBinary(t *testing.T) {
+	// Verify the download path is computed relative to the binary location,
+	// not hardcoded to /tmp.
+	newContent := []byte("binary for path test")
+	hash := sha256.Sum256(newContent)
+	checksum := "sha256:" + hex.EncodeToString(hash[:])
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(newContent)
+	}))
+	defer server.Close()
+
+	healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer healthServer.Close()
+
+	// Allow the test server URL (localhost in dev mode)
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
+
+	currentPath, cleanup := setupUpdateTest(t, "old binary", 0)
+	HealthCheckURL = healthServer.URL
+
+	// Before update, the .download file should not exist
+	downloadPath := currentPath + ".download"
+	if _, err := os.Stat(downloadPath); !os.IsNotExist(err) {
+		t.Fatal(".download file should not exist before update")
+	}
+
+	err := Update(server.URL, checksum)
+	if err != nil {
+		cleanup()
+		t.Fatalf("Update() error: %v", err)
+	}
+
+	// After successful update, the .download file should be cleaned up (defer)
+	// and the binary should be updated
+	time.Sleep(800 * time.Millisecond)
+	cleanup()
+
+	data, _ := os.ReadFile(currentPath)
+	if string(data) != string(newContent) {
+		t.Errorf("expected binary content %q, got %q", newContent, data)
+	}
+
+	// The .download temp file should have been cleaned up
+	if _, err := os.Stat(downloadPath); !os.IsNotExist(err) {
+		t.Error(".download file should be cleaned up after update")
+		os.Remove(downloadPath)
+	}
+}
+
+func TestUpdate_URLValidationRejectsInvalidURL(t *testing.T) {
+	_, cleanup := setupUpdateTest(t, "old binary", 0)
+	defer cleanup()
+
+	t.Setenv("KENI_SKIP_WIREGUARD", "")
+
+	err := Update("http://evil.example.com/malware", "sha256:abc")
+	if err == nil {
+		t.Fatal("expected URL validation error")
+	}
+	if !contains(err.Error(), "download URL rejected") {
+		t.Errorf("expected 'download URL rejected' in error, got: %v", err)
+	}
+}
+
 func TestDownloadBinary_DestPathInvalid(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("content"))
@@ -888,5 +1088,120 @@ func TestDownloadBinary_DestPathInvalid(t *testing.T) {
 	err := downloadBinary(server.URL, "/tmp/keni-nonexistent-dir-xyz/binary")
 	if err == nil {
 		t.Error("expected error when destination directory does not exist")
+	}
+}
+
+func TestUpdate_MarkerFileCreatedAndRemovedOnSuccess(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
+
+	newContent := []byte("new binary for marker test")
+	hash := sha256.Sum256(newContent)
+	checksum := "sha256:" + hex.EncodeToString(hash[:])
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(newContent)
+	}))
+	defer server.Close()
+
+	healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer healthServer.Close()
+
+	currentPath, cleanup := setupUpdateTest(t, "old binary", 0)
+	HealthCheckURL = healthServer.URL
+	markerFile := markerPathOverride
+
+	err := Update(server.URL, checksum)
+	if err != nil {
+		cleanup()
+		t.Fatalf("Update() error: %v", err)
+	}
+
+	// Wait for background goroutine to finish
+	time.Sleep(800 * time.Millisecond)
+	cleanup()
+
+	// Marker file should be removed after successful health check
+	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
+		t.Error("marker file should be removed after successful update")
+	}
+
+	// Binary should be updated
+	data, _ := os.ReadFile(currentPath)
+	if string(data) != string(newContent) {
+		t.Errorf("expected binary content %q, got %q", newContent, data)
+	}
+}
+
+func TestUpdate_MarkerFileRemovedOnRestartFailure(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
+
+	newContent := []byte("new binary for restart fail marker test")
+	hash := sha256.Sum256(newContent)
+	checksum := "sha256:" + hex.EncodeToString(hash[:])
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(newContent)
+	}))
+	defer server.Close()
+
+	_, cleanup := setupUpdateTest(t, "old binary", 0)
+	defer cleanup()
+	markerFile := markerPathOverride
+
+	restartFunc = func() error {
+		return fmt.Errorf("systemctl not available")
+	}
+
+	err := Update(server.URL, checksum)
+	if err == nil {
+		t.Fatal("expected restart error")
+	}
+
+	// Marker file should be removed after restart failure rollback
+	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
+		t.Error("marker file should be removed after restart failure")
+	}
+}
+
+func TestUpdate_MarkerFileRemovedOnHealthCheckFailure(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
+
+	newContent := []byte("new binary for health fail marker test")
+	hash := sha256.Sum256(newContent)
+	checksum := "sha256:" + hex.EncodeToString(hash[:])
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(newContent)
+	}))
+	defer server.Close()
+
+	healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer healthServer.Close()
+
+	_, cleanup := setupUpdateTest(t, "old binary", 0)
+	HealthCheckURL = healthServer.URL
+	HealthCheckTimeout = 200 * time.Millisecond
+	HealthCheckInterval = 50 * time.Millisecond
+	markerFile := markerPathOverride
+
+	restartFunc = func() error { return nil }
+
+	err := Update(server.URL, checksum)
+	if err != nil {
+		cleanup()
+		t.Fatalf("Update() error: %v", err)
+	}
+
+	// Wait for background goroutine to complete rollback
+	time.Sleep(800 * time.Millisecond)
+	cleanup()
+
+	// Marker file should be removed after health check failure rollback
+	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
+		t.Error("marker file should be removed after health check failure rollback")
 	}
 }
