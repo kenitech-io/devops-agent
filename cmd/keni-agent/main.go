@@ -354,9 +354,16 @@ func runRegistration() (*config.Config, error) {
 		return nil, fmt.Errorf("KENI_DASHBOARD_URL environment variable not set")
 	}
 
-	privKey, pubKey, err := wireguard.GenerateKeyPair()
-	if err != nil {
-		return nil, fmt.Errorf("generating WireGuard keypair: %w", err)
+	var privKey, pubKey string
+	if os.Getenv("KENI_SKIP_WIREGUARD") == "true" {
+		privKey = "dev-skip-wireguard"
+		pubKey = "dev-skip-wireguard"
+	} else {
+		var err error
+		privKey, pubKey, err = wireguard.GenerateKeyPair()
+		if err != nil {
+			return nil, fmt.Errorf("generating WireGuard keypair: %w", err)
+		}
 	}
 
 	info, err := register.GatherSystemInfo()
@@ -400,21 +407,33 @@ func runRegistration() (*config.Config, error) {
 		return nil, fmt.Errorf("registering with dashboard after %d attempts: %w", maxAttempts, err)
 	}
 
-	wgCfg := wireguard.Config{
-		PrivateKey:        privKey,
-		AssignedIP:        resp.AssignedIP,
-		DashboardPubKey:   resp.DashboardPublicKey,
-		DashboardEndpoint: resp.DashboardEndpoint,
+	// Skip WireGuard in dev mode (KENI_SKIP_WIREGUARD=true)
+	if os.Getenv("KENI_SKIP_WIREGUARD") != "true" {
+		wgCfg := wireguard.Config{
+			PrivateKey:        privKey,
+			AssignedIP:        resp.AssignedIP,
+			DashboardPubKey:   resp.DashboardPublicKey,
+			DashboardEndpoint: resp.DashboardEndpoint,
+		}
+		if err := wireguard.ConfigureInterface(wgCfg); err != nil {
+			return nil, fmt.Errorf("configuring WireGuard: %w", err)
+		}
+	} else {
+		slog.Info("skipping WireGuard setup (dev mode)")
 	}
-	if err := wireguard.ConfigureInterface(wgCfg); err != nil {
-		return nil, fmt.Errorf("configuring WireGuard: %w", err)
+
+	// Allow overriding the WebSocket endpoint for dev (e.g., Tailscale IP)
+	wsEndpoint := resp.WSEndpoint
+	if override := os.Getenv("KENI_WS_ENDPOINT"); override != "" {
+		slog.Info("overriding wsEndpoint", "from", wsEndpoint, "to", override)
+		wsEndpoint = override
 	}
 
 	cfg := &config.Config{
 		AgentID:           resp.AgentID,
 		AssignedIP:        resp.AssignedIP,
 		DashboardEndpoint: resp.DashboardEndpoint,
-		WSEndpoint:        resp.WSEndpoint,
+		WSEndpoint:        wsEndpoint,
 		WireGuardPrivKey:  privKey,
 		WireGuardPubKey:   pubKey,
 		DashboardPubKey:   resp.DashboardPublicKey,

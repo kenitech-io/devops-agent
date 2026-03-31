@@ -73,9 +73,7 @@ func (c *Config) Validate() error {
 	if c.WireGuardPubKey == "" {
 		missing = append(missing, "wireguard_public_key")
 	}
-	if c.DashboardPubKey == "" {
-		missing = append(missing, "dashboard_public_key")
-	}
+	// DashboardPubKey can be empty in dev mode (no WireGuard)
 	if c.DashboardURL == "" {
 		missing = append(missing, "dashboard_url")
 	}
