@@ -1,0 +1,25 @@
+[Unit]
+Description=Keni Agent
+Documentation=https://github.com/kenitech-io/devops-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/keni-agent
+Restart=always
+RestartSec=5
+EnvironmentFile=-/etc/keni-agent/env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=keni-agent
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/etc/keni-agent /etc/wireguard
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
