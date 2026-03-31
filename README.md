@@ -24,7 +24,16 @@ Dashboard Server (VPS)              Client Server
 On the client server (requires root):
 
 ```bash
-curl -s https://agent.kenitech.io/install.sh | sh -s -- \
+curl -fsSL https://raw.githubusercontent.com/kenitech-io/devops-agent/main/install.sh | sh -s -- \
+  --token keni_abc123... \
+  --dashboard-url https://dashboard.kenitech.io \
+  --ssh-key "ssh-ed25519 AAAA... keni-dashboard"
+```
+
+To install a specific version:
+
+```bash
+KENI_AGENT_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/kenitech-io/devops-agent/main/install.sh | sh -s -- \
   --token keni_abc123... \
   --dashboard-url https://dashboard.kenitech.io \
   --ssh-key "ssh-ed25519 AAAA... keni-dashboard"

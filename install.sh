@@ -8,7 +8,8 @@ AGENT_USER="keni"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/keni-agent"
 SERVICE_FILE="/etc/systemd/system/keni-agent.service"
-DOWNLOAD_BASE="https://agent.kenitech.io/download"
+GITHUB_REPO="kenitech-io/devops-agent"
+VERSION="${KENI_AGENT_VERSION:-latest}"
 
 # Defaults
 TOKEN=""
@@ -120,22 +121,43 @@ install_wireguard() {
     log "WireGuard installed successfully"
 }
 
-# Download and install the agent binary
+# Download and install the agent binary from GitHub Releases
 install_binary() {
     ARCH=$(detect_arch)
-    BINARY_URL="${DOWNLOAD_BASE}/keni-agent-linux-${ARCH}"
 
-    log "Downloading keni-agent for linux/${ARCH}..."
+    # Resolve version
+    if [ "$VERSION" = "latest" ]; then
+        log "Fetching latest release version..."
+        if command -v curl >/dev/null 2>&1; then
+            VERSION=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
+        elif command -v wget >/dev/null 2>&1; then
+            VERSION=$(wget -qO- "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
+        fi
+        if [ -z "$VERSION" ]; then
+            error "Could not determine latest version from GitHub. Set KENI_AGENT_VERSION explicitly."
+        fi
+        log "Latest version: ${VERSION}"
+    fi
+
+    TARBALL="keni-agent_${VERSION#v}_linux_${ARCH}.tar.gz"
+    BINARY_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${TARBALL}"
+
+    log "Downloading keni-agent ${VERSION} for linux/${ARCH}..."
+    TMPDIR=$(mktemp -d)
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "${INSTALL_DIR}/keni-agent" "$BINARY_URL"
+        curl -fsSL -o "${TMPDIR}/${TARBALL}" "$BINARY_URL"
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO "${INSTALL_DIR}/keni-agent" "$BINARY_URL"
+        wget -qO "${TMPDIR}/${TARBALL}" "$BINARY_URL"
     else
         error "Neither curl nor wget found. Install one and re-run."
     fi
 
+    tar -xzf "${TMPDIR}/${TARBALL}" -C "${TMPDIR}"
+    mv "${TMPDIR}/keni-agent" "${INSTALL_DIR}/keni-agent"
+    rm -rf "${TMPDIR}"
+
     chmod 755 "${INSTALL_DIR}/keni-agent"
-    log "Binary installed to ${INSTALL_DIR}/keni-agent"
+    log "Binary installed to ${INSTALL_DIR}/keni-agent (${VERSION})"
 }
 
 # Create config directory and environment file
