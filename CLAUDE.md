@@ -71,7 +71,8 @@ The dashboard auto-detects localhost and includes --dashboard-url in the install
 - Repo is public (agent binary has no secrets)
 - Binaries published via GitHub Releases (goreleaser on tag push)
 - Install script downloads from GitHub Releases, defaults to dashboard.kenitech.io
-- Pi5 demo: agent deployed via Tailscale, connected to local dashboard
+- Pi5 dev: agent deployed via Tailscale as dev client server
+- Production: agents connect to dashboard on Hostinger VPS
 - SSH key for Ansible: ~/.ssh/keni_dashboard (ed25519), public key in dashboard .env as DASHBOARD_SSH_PUBLIC_KEY
 
 ## Conventions
