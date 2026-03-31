@@ -124,6 +124,13 @@ install_wireguard() {
 
 # Download and install the agent binary from GitHub Releases
 install_binary() {
+    # Skip download if binary is already in place (manual or pre-staged install)
+    if [ -f "${INSTALL_DIR}/keni-agent" ]; then
+        log "Binary already exists at ${INSTALL_DIR}/keni-agent, skipping download"
+        chmod 755 "${INSTALL_DIR}/keni-agent"
+        return
+    fi
+
     ARCH=$(detect_arch)
 
     # Resolve version
