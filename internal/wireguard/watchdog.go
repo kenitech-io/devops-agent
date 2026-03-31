@@ -3,6 +3,7 @@ package wireguard
 import (
 	"context"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -16,7 +17,12 @@ const (
 
 // StartWatchdog periodically checks the wg0 interface health and attempts
 // recovery if the interface is down or the last handshake is stale.
+// Does nothing when KENI_SKIP_WIREGUARD=true.
 func StartWatchdog(ctx context.Context) {
+	if os.Getenv("KENI_SKIP_WIREGUARD") == "true" {
+		slog.Debug("WireGuard watchdog disabled (dev mode)")
+		return
+	}
 	go func() {
 		ticker := time.NewTicker(watchdogInterval)
 		defer ticker.Stop()
