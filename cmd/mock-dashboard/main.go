@@ -20,6 +20,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,7 +66,13 @@ type registerResponse struct {
 	DashboardPublicKey string `json:"dashboardPublicKey"`
 	DashboardEndpoint  string `json:"dashboardEndpoint"`
 	WSEndpoint         string `json:"wsEndpoint"`
+	WSToken            string `json:"wsToken"`
 }
+
+var (
+	wsTokens   = make(map[string]string) // agentID -> wsToken
+	wsTokensMu sync.Mutex
+)
 
 type errorResponse struct {
 	Code    string `json:"code"`
@@ -144,6 +151,12 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	ip := atomic.AddUint32(&nextIP, 1) - 1
 	assignedIP := fmt.Sprintf("10.99.0.%d", ip)
 	agentID := generateAgentID()
+	wsToken := generateWSToken()
+
+	// Store the ws_token for validation on WS connect
+	wsTokensMu.Lock()
+	wsTokens[agentID] = wsToken
+	wsTokensMu.Unlock()
 
 	// Determine the WebSocket URL based on the listening address
 	host, port, _ := net.SplitHostPort(*listenAddr)
@@ -158,6 +171,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		DashboardPublicKey: *wgPubKey,
 		DashboardEndpoint:  *wgEndpoint,
 		WSEndpoint:         wsEndpoint,
+		WSToken:            wsToken,
 	}
 
 	log.Printf("registered agent %s: hostname=%s, ip=%s, pubkey=%s...",
@@ -174,6 +188,26 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	agentID := r.URL.Query().Get("agentId")
 	if agentID == "" {
 		http.Error(w, "missing agentId", http.StatusBadRequest)
+		return
+	}
+
+	// Validate Bearer token
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		http.Error(w, "missing Authorization header", http.StatusUnauthorized)
+		return
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	if token == authHeader {
+		http.Error(w, "invalid Authorization format, expected Bearer token", http.StatusUnauthorized)
+		return
+	}
+
+	wsTokensMu.Lock()
+	expectedToken, exists := wsTokens[agentID]
+	wsTokensMu.Unlock()
+	if !exists || token != expectedToken {
+		http.Error(w, "invalid ws_token", http.StatusUnauthorized)
 		return
 	}
 
@@ -311,6 +345,12 @@ func generateAgentID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
 	return "ag_" + hex.EncodeToString(b)
+}
+
+func generateWSToken() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return "wst_" + hex.EncodeToString(b)
 }
 
 func truncate(s string, n int) string {

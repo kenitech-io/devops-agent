@@ -13,6 +13,39 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func TestClient_SendsBearerToken(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	tokenReceived := make(chan string, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenReceived <- r.Header.Get("Authorization")
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Read one message then close
+		conn.ReadMessage()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	client := NewClient(wsURL, "ag_auth", "wst_secret123", func(msg *Message) {})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go client.Run(ctx)
+
+	select {
+	case auth := <-tokenReceived:
+		if auth != "Bearer wst_secret123" {
+			t.Errorf("expected 'Bearer wst_secret123', got %q", auth)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for WS connection")
+	}
+	cancel()
+}
+
 func TestClient_ConnectAndHeartbeat(t *testing.T) {
 	var received []Message
 	var mu sync.Mutex
@@ -57,7 +90,7 @@ func TestClient_ConnectAndHeartbeat(t *testing.T) {
 		handlerMu.Unlock()
 	}
 
-	client := NewClient(wsURL, "ag_test123", handler)
+	client := NewClient(wsURL, "ag_test123", "test-ws-token", handler)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -160,7 +193,7 @@ func TestClient_ReceivePingRespondPong(t *testing.T) {
 			clientRef.Send(pong)
 		}
 	}
-	clientRef = NewClient(wsURL, "ag_test", handler)
+	clientRef = NewClient(wsURL, "ag_test", "test-ws-token", handler)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

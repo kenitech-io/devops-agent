@@ -26,6 +26,7 @@ func TestConfig_SaveAndLoad(t *testing.T) {
 		AssignedIP:        "10.99.0.5",
 		DashboardEndpoint: "203.0.113.10:51820",
 		WSEndpoint:        "wss://10.99.0.1:443/ws/agent",
+		WSToken:           "wst_testtoken123",
 		WireGuardPrivKey:  "test-priv-key",
 		WireGuardPubKey:   "test-pub-key",
 		DashboardPubKey:   "dashboard-pub-key",
@@ -106,6 +107,7 @@ func TestConfig_YAMLRoundtrip(t *testing.T) {
 		AssignedIP:        "10.99.0.99",
 		DashboardEndpoint: "1.2.3.4:51820",
 		WSEndpoint:        "wss://10.99.0.1/ws/agent",
+		WSToken:           "wst_roundtrip",
 		WireGuardPrivKey:  "priv123",
 		WireGuardPubKey:   "pub456",
 		DashboardPubKey:   "dashpub789",
@@ -156,6 +158,7 @@ func validConfig() *Config {
 		AssignedIP:        "10.99.0.5",
 		DashboardEndpoint: "1.2.3.4:51820",
 		WSEndpoint:        "wss://10.99.0.1/ws/agent",
+		WSToken:           "wst_testtoken",
 		WireGuardPrivKey:  "privkey",
 		WireGuardPubKey:   "pubkey",
 		DashboardPubKey:   "dashpub",
@@ -207,11 +210,38 @@ func TestValidate_InvalidWSEndpoint(t *testing.T) {
 	}
 }
 
-func TestValidate_WSEndpointPlain(t *testing.T) {
+func TestValidate_WSEndpointPlainRejectsInProd(t *testing.T) {
+	// Ensure we are NOT in dev mode
+	t.Setenv("KENI_SKIP_WIREGUARD", "")
+	cfg := validConfig()
+	cfg.WSEndpoint = "ws://10.99.0.1/ws/agent"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for ws:// in production mode")
+	}
+	if !contains(err.Error(), "wss://") {
+		t.Errorf("expected error about wss://, got: %v", err)
+	}
+}
+
+func TestValidate_WSEndpointPlainAllowedInDev(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 	cfg := validConfig()
 	cfg.WSEndpoint = "ws://10.99.0.1/ws/agent"
 	if err := cfg.Validate(); err != nil {
-		t.Errorf("ws:// should be valid, got: %v", err)
+		t.Errorf("ws:// should be valid in dev mode, got: %v", err)
+	}
+}
+
+func TestValidate_MissingWSToken(t *testing.T) {
+	cfg := validConfig()
+	cfg.WSToken = ""
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for missing ws_token")
+	}
+	if !contains(err.Error(), "ws_token") {
+		t.Errorf("expected error to mention ws_token, got: %v", err)
 	}
 }
 
@@ -226,4 +256,137 @@ func searchStr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestIsDevMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue string
+		want     bool
+	}{
+		{"set to true", "true", true},
+		{"set to false", "false", false},
+		{"set to empty", "", false},
+		{"set to 1", "1", false},
+		{"set to TRUE (uppercase)", "TRUE", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("KENI_SKIP_WIREGUARD", tt.envValue)
+			got := IsDevMode()
+			if got != tt.want {
+				t.Errorf("IsDevMode() = %v, want %v (env=%q)", got, tt.want, tt.envValue)
+			}
+		})
+	}
+}
+
+func TestIsDevMode_Unset(t *testing.T) {
+	// Ensure the env var is not set at all
+	t.Setenv("KENI_SKIP_WIREGUARD", "")
+	if IsDevMode() {
+		t.Error("IsDevMode() should return false when env var is empty")
+	}
+}
+
+func TestValidate_EmptyDashboardPubKeyAllowedInDevMode(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
+	cfg := validConfig()
+	cfg.DashboardPubKey = ""
+	cfg.WSEndpoint = "ws://10.99.0.1/ws/agent" // dev mode allows ws://
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("empty DashboardPubKey should be allowed in dev mode, got: %v", err)
+	}
+}
+
+func TestValidate_EmptyDashboardPubKeyAllowedInProd(t *testing.T) {
+	// DashboardPubKey is not in the required fields list per the code,
+	// so it should also pass in production mode.
+	t.Setenv("KENI_SKIP_WIREGUARD", "")
+	cfg := validConfig()
+	cfg.DashboardPubKey = ""
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("empty DashboardPubKey should be allowed (not enforced), got: %v", err)
+	}
+}
+
+func TestValidate_MissingDashboardURL(t *testing.T) {
+	cfg := validConfig()
+	cfg.DashboardURL = ""
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for missing dashboard_url")
+	}
+	if !contains(err.Error(), "dashboard_url") {
+		t.Errorf("expected error to mention dashboard_url, got: %v", err)
+	}
+}
+
+func TestValidate_MissingMultipleFields(t *testing.T) {
+	cfg := validConfig()
+	cfg.AgentID = ""
+	cfg.WSToken = ""
+	cfg.DashboardURL = ""
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for missing fields")
+	}
+	for _, field := range []string{"agent_id", "ws_token", "dashboard_url"} {
+		if !contains(err.Error(), field) {
+			t.Errorf("expected error to mention %q, got: %v", field, err)
+		}
+	}
+}
+
+func TestValidate_ValidIPAddresses(t *testing.T) {
+	tests := []struct {
+		name    string
+		ip      string
+		wantErr bool
+	}{
+		{"valid IPv4", "10.99.0.5", false},
+		{"valid IPv4 loopback", "127.0.0.1", false},
+		{"valid IPv6", "::1", false},
+		{"invalid IP", "999.999.999.999", true},
+		{"partial IP", "10.99", true},
+		{"hostname not IP", "myhost.local", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.AssignedIP = tt.ip
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for IP %q", tt.ip)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for IP %q: %v", tt.ip, err)
+			}
+		})
+	}
+}
+
+func TestLoad_MissingFile(t *testing.T) {
+	// Load() reads from the hardcoded /etc/keni-agent/config.yml.
+	// On a test machine this file should not exist, so Load should return an error.
+	_, err := Load()
+	if err == nil {
+		t.Skip("skipping: /etc/keni-agent/config.yml exists on this machine")
+	}
+	if !contains(err.Error(), "reading config") {
+		t.Errorf("expected 'reading config' error, got: %v", err)
+	}
+}
+
+func TestSave_ErrorOnRestrictedPath(t *testing.T) {
+	// Save() writes to /etc/keni-agent which typically requires root.
+	// On a non-root test run this should fail with a permission error.
+	cfg := validConfig()
+	err := cfg.Save()
+	if err == nil {
+		t.Skip("skipping: running as root or /etc/keni-agent is writable")
+	}
+	if !contains(err.Error(), "creating config dir") && !contains(err.Error(), "writing config") {
+		t.Errorf("expected config dir or write error, got: %v", err)
+	}
 }

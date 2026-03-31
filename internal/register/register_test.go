@@ -14,6 +14,7 @@ func TestRegister_Success(t *testing.T) {
 		DashboardPublicKey: "dashboard-pub-key-base64",
 		DashboardEndpoint:  "203.0.113.10:51820",
 		WSEndpoint:         "wss://10.99.0.1:443/ws/agent",
+		WSToken:            "wst_abc123",
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -76,6 +77,9 @@ func TestRegister_Success(t *testing.T) {
 	}
 	if resp.WSEndpoint != expected.WSEndpoint {
 		t.Errorf("WSEndpoint = %s, want %s", resp.WSEndpoint, expected.WSEndpoint)
+	}
+	if resp.WSToken != expected.WSToken {
+		t.Errorf("WSToken = %s, want %s", resp.WSToken, expected.WSToken)
 	}
 }
 

@@ -118,6 +118,7 @@ type UpdateAvailablePayload struct {
 	Version     string `json:"version"`
 	DownloadURL string `json:"downloadUrl"`
 	Checksum    string `json:"checksum"`
+	Signature   string `json:"signature"`
 }
 
 // PingPayload is empty.

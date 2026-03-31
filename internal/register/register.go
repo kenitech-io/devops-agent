@@ -31,6 +31,7 @@ type Response struct {
 	DashboardPublicKey string `json:"dashboardPublicKey"`
 	DashboardEndpoint  string `json:"dashboardEndpoint"`
 	WSEndpoint         string `json:"wsEndpoint"`
+	WSToken            string `json:"wsToken"`
 }
 
 // ErrorResponse is returned on registration failure.

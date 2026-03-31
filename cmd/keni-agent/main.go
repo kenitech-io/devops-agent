@@ -18,6 +18,7 @@ import (
 	"github.com/kenitech-io/devops-agent/internal/logging"
 	"github.com/kenitech-io/devops-agent/internal/metrics"
 	"github.com/kenitech-io/devops-agent/internal/register"
+	"github.com/kenitech-io/devops-agent/internal/signing"
 	"github.com/kenitech-io/devops-agent/internal/update"
 	"github.com/kenitech-io/devops-agent/internal/wireguard"
 	"github.com/kenitech-io/devops-agent/internal/ws"
@@ -89,7 +90,7 @@ func runAgent(ctx context.Context, cfg *config.Config) {
 	handler := func(msg *ws.Message) {
 		handleDashboardMessage(ctx, client, msg, &cmdMu, &cmdWg)
 	}
-	client = ws.NewClient(cfg.WSEndpoint, cfg.AgentID, handler)
+	client = ws.NewClient(cfg.WSEndpoint, cfg.AgentID, cfg.WSToken, handler)
 	client.SetConnectionCallback(func(connected bool) {
 		metrics.SetWSConnected(connected)
 		if !connected {
@@ -294,6 +295,12 @@ func handleUpdateAvailable(msg *ws.Message) {
 
 	slog.Info("update available", "version", payload.Version)
 
+	// Verify release signature before proceeding
+	if err := signing.VerifyChecksum(payload.Checksum, payload.Signature); err != nil {
+		slog.Error("release signature verification failed, rejecting update", "error", err, "version", payload.Version)
+		return
+	}
+
 	if err := update.Update(payload.DownloadURL, payload.Checksum); err != nil {
 		slog.Error("self-update failed", "error", err)
 	}
@@ -434,6 +441,7 @@ func runRegistration() (*config.Config, error) {
 		AssignedIP:        resp.AssignedIP,
 		DashboardEndpoint: resp.DashboardEndpoint,
 		WSEndpoint:        wsEndpoint,
+		WSToken:           resp.WSToken,
 		WireGuardPrivKey:  privKey,
 		WireGuardPubKey:   pubKey,
 		DashboardPubKey:   resp.DashboardPublicKey,

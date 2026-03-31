@@ -20,7 +20,16 @@ func CollectWireGuard() wsTypes.WireGuardInfo {
 		return info
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	return parseWgDump(string(out))
+}
+
+// parseWgDump parses the output of 'wg show wg0 dump'.
+func parseWgDump(output string) wsTypes.WireGuardInfo {
+	info := wsTypes.WireGuardInfo{
+		Interface: "wg0",
+	}
+
+	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if len(lines) < 1 {
 		return info
 	}

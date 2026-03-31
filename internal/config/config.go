@@ -10,6 +10,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// IsDevMode returns true when WireGuard is skipped (Tailscale/local dev).
+func IsDevMode() bool {
+	return os.Getenv("KENI_SKIP_WIREGUARD") == "true"
+}
+
 const (
 	ConfigDir  = "/etc/keni-agent"
 	ConfigFile = "config.yml"
@@ -21,6 +26,7 @@ type Config struct {
 	AssignedIP        string `yaml:"assigned_ip"`
 	DashboardEndpoint string `yaml:"dashboard_endpoint"`
 	WSEndpoint        string `yaml:"ws_endpoint"`
+	WSToken           string `yaml:"ws_token"`
 	WireGuardPrivKey  string `yaml:"wireguard_private_key"`
 	WireGuardPubKey   string `yaml:"wireguard_public_key"`
 	DashboardPubKey   string `yaml:"dashboard_public_key"`
@@ -66,6 +72,11 @@ func (c *Config) Validate() error {
 		missing = append(missing, "ws_endpoint")
 	} else if !strings.HasPrefix(c.WSEndpoint, "ws://") && !strings.HasPrefix(c.WSEndpoint, "wss://") {
 		return fmt.Errorf("invalid ws_endpoint: %q must start with ws:// or wss://", c.WSEndpoint)
+	} else if !IsDevMode() && strings.HasPrefix(c.WSEndpoint, "ws://") {
+		return fmt.Errorf("ws_endpoint must use wss:// in production (ws:// only allowed in dev mode with KENI_SKIP_WIREGUARD=true)")
+	}
+	if c.WSToken == "" {
+		missing = append(missing, "ws_token")
 	}
 	if c.WireGuardPrivKey == "" {
 		missing = append(missing, "wireguard_private_key")

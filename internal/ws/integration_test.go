@@ -80,7 +80,7 @@ func TestIntegration_CommandRequestResponse(t *testing.T) {
 			clientRef.Send(result)
 		}
 	}
-	clientRef = NewClient(wsURL, "ag_integration", handler)
+	clientRef = NewClient(wsURL, "ag_integration", "test-ws-token", handler)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -196,7 +196,7 @@ func TestIntegration_StreamingCommand(t *testing.T) {
 			clientRef.Send(completeMsg)
 		}
 	}
-	clientRef = NewClient(wsURL, "ag_stream", handler)
+	clientRef = NewClient(wsURL, "ag_stream", "test-ws-token", handler)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -341,7 +341,7 @@ func TestIntegration_BusyRejectsSecondCommand(t *testing.T) {
 			}()
 		}
 	}
-	clientRef = NewClient(wsURL, "ag_busy", handler)
+	clientRef = NewClient(wsURL, "ag_busy", "test-ws-token", handler)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

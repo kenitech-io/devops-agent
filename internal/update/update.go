@@ -13,8 +13,23 @@ import (
 	"time"
 )
 
+// HealthCheckURL is the local health endpoint used to verify the agent after update.
+var HealthCheckURL = "http://127.0.0.1:9100/healthz"
+
+// HealthCheckTimeout is how long to wait for the new binary to become healthy.
+var HealthCheckTimeout = 60 * time.Second
+
+// HealthCheckInterval is the polling interval during post-update health check.
+var HealthCheckInterval = 5 * time.Second
+
+// restartFunc is the function used to restart the service. Override in tests.
+var restartFunc = restartSystemd
+
+// executableFunc returns the path of the current executable. Override in tests.
+var executableFunc = os.Executable
+
 // Update downloads a new agent binary, verifies its checksum, replaces the
-// current binary, and restarts via systemd.
+// current binary with rollback support, and restarts via systemd.
 func Update(downloadURL, expectedChecksum string) error {
 	slog.Info("starting self-update", "url", downloadURL)
 
@@ -31,22 +46,60 @@ func Update(downloadURL, expectedChecksum string) error {
 	}
 
 	// Get path of current binary
-	currentPath, err := os.Executable()
+	currentPath, err := executableFunc()
 	if err != nil {
 		return fmt.Errorf("getting current executable path: %w", err)
 	}
 
+	// Back up the current binary for rollback
+	prevPath := currentPath + ".prev"
+	if err := backupBinary(currentPath, prevPath); err != nil {
+		return fmt.Errorf("backing up current binary: %w", err)
+	}
+	slog.Info("backed up current binary", "path", prevPath)
+
 	// Replace the binary
 	if err := replaceBinary(tmpPath, currentPath); err != nil {
+		// Restore from backup on replace failure
+		restoreErr := os.Rename(prevPath, currentPath)
+		if restoreErr != nil {
+			slog.Error("failed to restore backup after replace failure", "error", restoreErr)
+		}
 		return fmt.Errorf("replacing binary: %w", err)
 	}
 
 	slog.Info("binary replaced, restarting via systemd")
 
 	// Restart the service
-	if err := restart(); err != nil {
+	if err := restartFunc(); err != nil {
+		slog.Error("restart failed, rolling back", "error", err)
+		if rollbackErr := rollback(prevPath, currentPath); rollbackErr != nil {
+			slog.Error("rollback failed", "error", rollbackErr)
+		}
 		return fmt.Errorf("restarting service: %w", err)
 	}
+
+	// Post-restart health check (runs in a goroutine since systemd will restart us)
+	// The new process handles its own health. If this process survives long enough
+	// to reach here, check health and rollback if needed.
+	// Snapshot config to avoid race with tests that swap globals.
+	restartFn := restartFunc
+	healthURL := HealthCheckURL
+	healthTimeout := HealthCheckTimeout
+	healthInterval := HealthCheckInterval
+	go func() {
+		if err := waitForHealthy(healthURL, healthTimeout, healthInterval); err != nil {
+			slog.Error("post-update health check failed, rolling back", "error", err)
+			if rollbackErr := rollback(prevPath, currentPath); rollbackErr != nil {
+				slog.Error("rollback after health check failure failed", "error", rollbackErr)
+				return
+			}
+			restartFn()
+		} else {
+			slog.Info("post-update health check passed, removing backup")
+			os.Remove(prevPath)
+		}
+	}()
 
 	return nil
 }
@@ -140,7 +193,65 @@ func replaceBinary(srcPath, destPath string) error {
 	return nil
 }
 
-func restart() error {
+func backupBinary(srcPath, destPath string) error {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		os.Remove(destPath)
+		return err
+	}
+
+	if err := dst.Chmod(0755); err != nil {
+		dst.Close()
+		os.Remove(destPath)
+		return err
+	}
+	return dst.Close()
+}
+
+func rollback(prevPath, currentPath string) error {
+	slog.Warn("rolling back to previous binary", "from", prevPath, "to", currentPath)
+	if err := os.Rename(prevPath, currentPath); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", prevPath, currentPath, err)
+	}
+	return nil
+}
+
+func waitForHealthy(url string, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Give the new process a moment to start
+	time.Sleep(interval)
+
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+			slog.Warn("health check returned non-200", "status", resp.StatusCode)
+		} else {
+			slog.Warn("health check failed", "error", err)
+		}
+		time.Sleep(interval)
+	}
+
+	return fmt.Errorf("health check did not pass within %s", timeout)
+}
+
+func restartSystemd() error {
 	out, err := exec.Command("systemctl", "restart", "keni-agent").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, string(out))

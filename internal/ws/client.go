@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ type ConnectionCallback func(connected bool)
 type Client struct {
 	wsEndpoint string
 	agentID    string
+	wsToken    string
 	handler    MessageHandler
 	onConnect  ConnectionCallback
 
@@ -36,10 +38,11 @@ type Client struct {
 }
 
 // NewClient creates a new WebSocket client.
-func NewClient(wsEndpoint, agentID string, handler MessageHandler) *Client {
+func NewClient(wsEndpoint, agentID, wsToken string, handler MessageHandler) *Client {
 	return &Client{
 		wsEndpoint: wsEndpoint,
 		agentID:    agentID,
+		wsToken:    wsToken,
 		handler:    handler,
 		sendCh:     make(chan []byte, 64),
 	}
@@ -95,7 +98,12 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		HandshakeTimeout: 10 * time.Second,
 	}
 
-	conn, _, err := dialer.DialContext(ctx, url, nil)
+	headers := http.Header{}
+	if c.wsToken != "" {
+		headers.Set("Authorization", "Bearer "+c.wsToken)
+	}
+
+	conn, _, err := dialer.DialContext(ctx, url, headers)
 	if err != nil {
 		return fmt.Errorf("dialing %s: %w", url, err)
 	}

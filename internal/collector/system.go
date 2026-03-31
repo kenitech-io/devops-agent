@@ -37,8 +37,12 @@ func getLoadAverage() []float64 {
 		// Fallback to uptime parsing
 		return getLoadFromUptime()
 	}
+	return parseLoadAvgProc(string(out))
+}
 
-	parts := strings.Fields(string(out))
+// parseLoadAvgProc parses /proc/loadavg content.
+func parseLoadAvgProc(content string) []float64 {
+	parts := strings.Fields(content)
 	if len(parts) < 3 {
 		return []float64{0, 0, 0}
 	}
@@ -58,8 +62,11 @@ func getLoadFromUptime() []float64 {
 	if err != nil {
 		return []float64{0, 0, 0}
 	}
+	return parseUptimeOutput(string(out))
+}
 
-	line := string(out)
+// parseUptimeOutput parses the output of the uptime command to extract load averages.
+func parseUptimeOutput(line string) []float64 {
 	idx := strings.Index(line, "load average:")
 	if idx == -1 {
 		// Some systems use "load averages:"
@@ -89,8 +96,12 @@ func getMemoryInfo() (usedMb, totalMb int64) {
 	if err != nil {
 		return 0, 0
 	}
+	return parseFreeOutput(string(out))
+}
 
-	lines := strings.Split(string(out), "\n")
+// parseFreeOutput parses the output of 'free -m' to extract used and total memory.
+func parseFreeOutput(output string) (usedMb, totalMb int64) {
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "Mem:") {
 			fields := strings.Fields(line)
@@ -110,8 +121,12 @@ func getDiskInfo() (usedGb, totalGb float64) {
 	if err != nil {
 		return 0, 0
 	}
+	return parseDfOutput(string(out))
+}
 
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+// parseDfOutput parses the output of 'df -BG --output=size,used'.
+func parseDfOutput(output string) (usedGb, totalGb float64) {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if len(lines) < 2 {
 		return 0, 0
 	}
