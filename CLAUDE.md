@@ -38,6 +38,21 @@ Read both docs before making any architectural decisions.
 6. Streaming commands
 7. Self-update
 
+## v1.0 security hardening (all complete)
+
+- WebSocket auth: Bearer token (ws_token) on every WS connect
+- TLS enforcement: wss:// required in production, ws:// only in dev mode
+- Release signing: ed25519 key pair, CI signs checksums, agent verifies
+- Rollback: .prev binary backup, 60s health check post-update, auto-restore on failure
+- Test coverage: all modules above 60% (commands 74%, update 79%, collector 79%, config 71%, wireguard 45%, signing 84%, ws 82%)
+
+## Release signing
+
+- Private key: GitHub Secret `RELEASE_SIGNING_KEY`
+- Public key: embedded in `internal/signing/signing.go`
+- Generate new key pair: `go run ./cmd/generate-signing-key`
+- CI signs checksums.txt on tag push via `cmd/sign-release`
+
 ## Implementation issue
 
 https://github.com/kenitech-io/devops-agent/issues/1 (closed)

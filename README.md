@@ -19,6 +19,16 @@ Dashboard Server (VPS)              Client Server
 - After registration: WebSocket over WireGuard for heartbeats, status, commands
 - All commands are whitelisted actions with validated parameters, no shell interpretation
 
+## Security
+
+- **WebSocket auth**: Agent authenticates with a Bearer token (`ws_token`) on every WebSocket connection. Token is generated during registration, stored in config.yml (mode 0600).
+- **TLS enforcement**: Production requires `wss://` for WebSocket. Plain `ws://` only allowed in dev mode (`KENI_SKIP_WIREGUARD=true`).
+- **Release signing**: Binaries are signed with ed25519 in CI. The agent embeds the public key and verifies signatures before applying updates.
+- **Rollback**: Before self-update, the current binary is backed up to `.prev`. After restart, health check polls `/healthz` for 60s. On failure, restores the previous binary automatically.
+- **Command sandboxing**: All commands use `exec.Command` with argument arrays. No shell interpretation. Parameters validated per whitelist.
+- **Systemd hardening**: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`.
+- **Config protection**: config.yml at mode 0600, config directory at mode 0750.
+
 ## Installation
 
 On the client server (requires root):
@@ -66,6 +76,7 @@ agent_id: ag_abc123
 assigned_ip: 10.99.0.5
 dashboard_endpoint: 203.0.113.10:51820
 ws_endpoint: wss://10.99.0.1:443/ws/agent
+ws_token: wst_<hex>
 wireguard_private_key: <base64>
 wireguard_public_key: <base64>
 dashboard_public_key: <base64>
@@ -176,6 +187,7 @@ KENI_AGENT_TOKEN=keni_testtoken KENI_DASHBOARD_URL=http://localhost:8080 go run 
 > send ag_abc123 system_info
 > send ag_abc123 docker_logs name=traefik lines=50
 > ping ag_abc123
+> update ag_abc123 v1.0.0 https://github.com/.../keni-agent sha256:abc123 sig456
 ```
 
 ### Automated E2E test
@@ -188,20 +200,23 @@ KENI_AGENT_TOKEN=keni_testtoken KENI_DASHBOARD_URL=http://localhost:8080 go run 
 
 ```
 cmd/
-  keni-agent/          - Main agent binary
-  mock-dashboard/      - Test dashboard server with interactive CLI
+  keni-agent/            - Main agent binary
+  mock-dashboard/        - Test dashboard server with interactive CLI
+  generate-signing-key/  - Generate ed25519 key pair for release signing
+  sign-release/          - Sign checksums file in CI pipeline
 internal/
-  config/              - YAML config persistence and validation
-  register/            - Registration flow (POST /api/agent/register)
-  wireguard/           - WireGuard keypair generation, wg0 config, watchdog
-  ws/                  - WebSocket client, message types, reconnection
-  collector/           - System metrics, container, backup, WireGuard data
-  commands/            - Whitelisted command execution with parameter validation
-  update/              - Self-update: download, verify, replace, restart
-  metrics/             - Prometheus metrics and health check endpoint
-  logging/             - Structured logging (slog) configuration
+  config/                - YAML config persistence and validation
+  register/              - Registration flow (POST /api/agent/register)
+  wireguard/             - WireGuard keypair generation, wg0 config, watchdog
+  ws/                    - WebSocket client, message types, reconnection
+  collector/             - System metrics, container, backup, WireGuard data
+  commands/              - Whitelisted command execution with parameter validation
+  update/                - Self-update: download, verify, replace, rollback, restart
+  signing/               - Ed25519 release signature verification
+  metrics/               - Prometheus metrics and health check endpoint
+  logging/               - Structured logging (slog) configuration
 scripts/
-  e2e-test.sh          - Automated end-to-end test
+  e2e-test.sh            - Automated end-to-end test
 ```
 
 ### Release

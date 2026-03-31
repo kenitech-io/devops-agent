@@ -61,10 +61,14 @@ if [ -f /etc/wireguard/wg0.conf ]; then
     log "Removed WireGuard config"
 fi
 
-# Remove agent binary
+# Remove agent binary and rollback backup
 if [ -f /usr/local/bin/keni-agent ]; then
     rm -f /usr/local/bin/keni-agent
     log "Removed agent binary"
+fi
+if [ -f /usr/local/bin/keni-agent.prev ]; then
+    rm -f /usr/local/bin/keni-agent.prev
+    log "Removed rollback backup binary"
 fi
 
 # Remove config directory

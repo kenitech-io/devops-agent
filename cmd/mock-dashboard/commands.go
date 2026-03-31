@@ -20,6 +20,7 @@ func startCLI() {
 	fmt.Println("  list                          - List connected agents")
 	fmt.Println("  send <agentId> <action>       - Send a command to an agent")
 	fmt.Println("  ping <agentId>                - Send a ping to an agent")
+	fmt.Println("  update <agentId> <ver> <url> <checksum> [sig] - Send update_available")
 	fmt.Println("  token <token>                 - Add a valid registration token")
 	fmt.Println("  help                          - Show this help")
 	fmt.Println()
@@ -51,6 +52,16 @@ func startCLI() {
 			} else {
 				cliSend(parts[1], parts[2], true, nil)
 			}
+		case "update":
+			if len(parts) < 5 {
+				fmt.Println("usage: update <agentId> <version> <downloadUrl> <checksum> [signature]")
+			} else {
+				sig := ""
+				if len(parts) >= 6 {
+					sig = parts[5]
+				}
+				cliUpdate(parts[1], parts[2], parts[3], parts[4], sig)
+			}
 		case "ping":
 			if len(parts) < 2 {
 				fmt.Println("usage: ping <agentId>")
@@ -67,12 +78,15 @@ func startCLI() {
 				fmt.Printf("added token: %s\n", parts[1])
 			}
 		case "help":
-			fmt.Println("Commands: list, send, stream, ping, token, help")
+			fmt.Println("Commands: list, send, stream, update, ping, token, help")
 			fmt.Println()
 			fmt.Println("Actions: container_list, container_stats, container_restart name=X,")
 			fmt.Println("  backup_snapshots, backup_stats, backup_trigger, system_disk,")
 			fmt.Println("  system_memory, system_info, service_status name=X,")
 			fmt.Println("  wireguard_status, docker_logs name=X lines=100")
+			fmt.Println()
+			fmt.Println("Update: update <agentId> <version> <downloadUrl> <checksum> [signature]")
+			fmt.Println("  Example: update ag_abc v1.0.0 https://github.com/.../keni-agent sha256:abc sig123")
 		default:
 			fmt.Printf("unknown command: %s (try 'help')\n", cmd)
 		}
@@ -150,6 +164,38 @@ func cliPing(agentID string) {
 		return
 	}
 	log.Printf("sent ping to agent %s", agentID)
+}
+
+func cliUpdate(agentID, version, downloadURL, checksum, signature string) {
+	agentsMu.Lock()
+	agent, ok := agents[agentID]
+	agentsMu.Unlock()
+
+	if !ok {
+		fmt.Printf("agent %s not found\n", agentID)
+		return
+	}
+
+	payload := agentWs.UpdateAvailablePayload{
+		Version:     version,
+		DownloadURL: downloadURL,
+		Checksum:    checksum,
+		Signature:   signature,
+	}
+
+	msg, err := agentWs.NewMessage(agentWs.TypeUpdateAvailable, payload)
+	if err != nil {
+		fmt.Printf("error creating message: %v\n", err)
+		return
+	}
+
+	data, _ := json.Marshal(msg)
+	if err := agent.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		fmt.Printf("error sending to agent: %v\n", err)
+		return
+	}
+
+	log.Printf("sent update_available to agent %s: version=%s url=%s", agentID, version, downloadURL)
 }
 
 func parseParams(args []string) map[string]interface{} {
