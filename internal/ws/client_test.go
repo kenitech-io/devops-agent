@@ -211,6 +211,246 @@ func TestClient_ReceivePingRespondPong(t *testing.T) {
 	cancel()
 }
 
+func TestClient_BuffersHeartbeatWhenDisconnected(t *testing.T) {
+	// Create a client that is NOT connected (no Run called).
+	// Fill the send channel completely, then send a heartbeat.
+	// It should be buffered (no error), not dropped.
+	handler := func(msg *Message) {}
+	client := NewClient("ws://localhost:9999", "ag_buf_test", "tok", handler)
+
+	// Fill the send channel to capacity.
+	for i := 0; i < cap(client.sendCh); i++ {
+		client.sendCh <- []byte(`{"type":"filler"}`)
+	}
+
+	// Now send a heartbeat: should be buffered, not return an error.
+	hb, err := NewMessage(TypeHeartbeat, HeartbeatPayload{Uptime: 42, AgentVersion: "0.1.0"})
+	if err != nil {
+		t.Fatalf("NewMessage error: %v", err)
+	}
+	if err := client.Send(hb); err != nil {
+		t.Fatalf("expected heartbeat to be buffered, got error: %v", err)
+	}
+
+	// Verify it was stored.
+	client.pendingMu.Lock()
+	if client.pendingHeartbeat == nil {
+		t.Error("expected pendingHeartbeat to be non-nil")
+	}
+	client.pendingMu.Unlock()
+
+	// Also test status_report buffering.
+	sr, err := NewMessage(TypeStatusReport, StatusReportPayload{})
+	if err != nil {
+		t.Fatalf("NewMessage error: %v", err)
+	}
+	if err := client.Send(sr); err != nil {
+		t.Fatalf("expected status_report to be buffered, got error: %v", err)
+	}
+
+	client.pendingMu.Lock()
+	if client.pendingStatusReport == nil {
+		t.Error("expected pendingStatusReport to be non-nil")
+	}
+	client.pendingMu.Unlock()
+
+	// A non-bufferable message type should return an error.
+	pong, _ := NewMessage(TypePong, PongPayload{PingID: "test"})
+	if err := client.Send(pong); err == nil {
+		t.Error("expected error for non-bufferable message type when channel is full")
+	}
+}
+
+func TestClient_FlushesOnReconnect(t *testing.T) {
+	var received []Message
+	var mu sync.Mutex
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg Message
+			if json.Unmarshal(data, &msg) == nil {
+				mu.Lock()
+				received = append(received, msg)
+				mu.Unlock()
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	handler := func(msg *Message) {}
+	client := NewClient(wsURL, "ag_flush", "tok", handler)
+
+	// Pre-buffer a heartbeat and status report before connecting.
+	hbMsg, _ := NewMessage(TypeHeartbeat, HeartbeatPayload{Uptime: 99, AgentVersion: "0.1.0"})
+	hbData, _ := json.Marshal(hbMsg)
+	srMsg, _ := NewMessage(TypeStatusReport, StatusReportPayload{})
+	srData, _ := json.Marshal(srMsg)
+
+	client.pendingMu.Lock()
+	client.pendingHeartbeat = hbData
+	client.pendingStatusReport = srData
+	client.pendingMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go client.Run(ctx)
+
+	// Wait for connection and flush.
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(received) < 2 {
+		t.Fatalf("expected at least 2 flushed messages, got %d", len(received))
+	}
+
+	types := map[string]bool{}
+	for _, m := range received {
+		types[m.Type] = true
+	}
+	if !types[TypeHeartbeat] {
+		t.Error("expected flushed heartbeat message")
+	}
+	if !types[TypeStatusReport] {
+		t.Error("expected flushed status_report message")
+	}
+
+	// Verify pending buffers are cleared.
+	client.pendingMu.Lock()
+	if client.pendingHeartbeat != nil {
+		t.Error("expected pendingHeartbeat to be nil after flush")
+	}
+	if client.pendingStatusReport != nil {
+		t.Error("expected pendingStatusReport to be nil after flush")
+	}
+	client.pendingMu.Unlock()
+
+	cancel()
+}
+
+func TestConfigBackupPayload_NoSecrets(t *testing.T) {
+	// ConfigBackupPayload must NOT include sensitive fields like ws_token or wireguard keys.
+	payload := ConfigBackupPayload{
+		AgentID:       "ag_test123",
+		AssignedIP:    "10.99.0.5",
+		WSEndpoint:    "wss://10.99.0.1/ws/agent",
+		DashboardURL:  "https://dash.example.com",
+		AgentVersion:  "1.0.0",
+		ConfigVersion: 1,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	// These fields must NOT appear in the payload
+	secretFields := []string{"wsToken", "ws_token", "wireguardPrivKey", "wireguard_private_key", "wireguardPubKey", "wireguard_public_key", "dashboardPubKey", "dashboard_public_key"}
+	for _, field := range secretFields {
+		if _, exists := raw[field]; exists {
+			t.Errorf("ConfigBackupPayload must not contain secret field %q", field)
+		}
+	}
+
+	// These fields must be present
+	expectedFields := []string{"agentId", "assignedIp", "wsEndpoint", "dashboardUrl", "agentVersion", "configVersion"}
+	for _, field := range expectedFields {
+		if _, exists := raw[field]; !exists {
+			t.Errorf("ConfigBackupPayload missing expected field %q", field)
+		}
+	}
+}
+
+func TestConfigBackupPayload_RoundTrip(t *testing.T) {
+	payload := ConfigBackupPayload{
+		AgentID:       "ag_roundtrip",
+		AssignedIP:    "10.99.0.10",
+		WSEndpoint:    "wss://10.99.0.1:443/ws/agent",
+		DashboardURL:  "https://dashboard.kenitech.io",
+		AgentVersion:  "1.2.3",
+		ConfigVersion: 1,
+	}
+
+	msg, err := NewMessage(TypeConfigBackup, payload)
+	if err != nil {
+		t.Fatalf("NewMessage error: %v", err)
+	}
+
+	if msg.Type != TypeConfigBackup {
+		t.Errorf("expected type %s, got %s", TypeConfigBackup, msg.Type)
+	}
+	if !strings.HasPrefix(msg.ID, "config_backup_") {
+		t.Errorf("expected ID prefix config_backup_, got %s", msg.ID)
+	}
+
+	var decoded ConfigBackupPayload
+	if err := json.Unmarshal(msg.Payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+
+	if decoded.AgentID != payload.AgentID {
+		t.Errorf("AgentID = %s, want %s", decoded.AgentID, payload.AgentID)
+	}
+	if decoded.AssignedIP != payload.AssignedIP {
+		t.Errorf("AssignedIP = %s, want %s", decoded.AssignedIP, payload.AssignedIP)
+	}
+	if decoded.AgentVersion != payload.AgentVersion {
+		t.Errorf("AgentVersion = %s, want %s", decoded.AgentVersion, payload.AgentVersion)
+	}
+	if decoded.ConfigVersion != payload.ConfigVersion {
+		t.Errorf("ConfigVersion = %d, want %d", decoded.ConfigVersion, payload.ConfigVersion)
+	}
+}
+
+func TestConfigUpdatePayload_OmitsEmpty(t *testing.T) {
+	payload := ConfigUpdatePayload{
+		WSEndpoint:   "",
+		WSToken:      "wst_new",
+		DashboardURL: "",
+		RestartAfter: true,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var raw map[string]interface{}
+	json.Unmarshal(data, &raw)
+
+	if _, exists := raw["wsEndpoint"]; exists {
+		t.Error("empty wsEndpoint should be omitted from JSON")
+	}
+	if _, exists := raw["dashboardUrl"]; exists {
+		t.Error("empty dashboardUrl should be omitted from JSON")
+	}
+	if _, exists := raw["wsToken"]; !exists {
+		t.Error("non-empty wsToken should be present in JSON")
+	}
+	if _, exists := raw["restartAfter"]; !exists {
+		t.Error("restartAfter should be present in JSON")
+	}
+}
+
 func TestNewMessage(t *testing.T) {
 	payload := HeartbeatPayload{Uptime: 100, AgentVersion: "0.1.0"}
 	msg, err := NewMessage(TypeHeartbeat, payload)

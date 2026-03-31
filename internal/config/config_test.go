@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,6 +23,7 @@ func TestConfig_SaveAndLoad(t *testing.T) {
 	}()
 
 	cfg := &Config{
+		ConfigVersion:     CurrentConfigVersion,
 		AgentID:           "ag_test123",
 		AssignedIP:        "10.99.0.5",
 		DashboardEndpoint: "203.0.113.10:51820",
@@ -103,6 +105,7 @@ func TestConfig_MissingAgentID(t *testing.T) {
 
 func TestConfig_YAMLRoundtrip(t *testing.T) {
 	cfg := &Config{
+		ConfigVersion:     CurrentConfigVersion,
 		AgentID:           "ag_roundtrip",
 		AssignedIP:        "10.99.0.99",
 		DashboardEndpoint: "1.2.3.4:51820",
@@ -154,6 +157,7 @@ func TestConfig_FilePermissions(t *testing.T) {
 
 func validConfig() *Config {
 	return &Config{
+		ConfigVersion:     CurrentConfigVersion,
 		AgentID:           "ag_test",
 		AssignedIP:        "10.99.0.5",
 		DashboardEndpoint: "1.2.3.4:51820",
@@ -233,15 +237,12 @@ func TestValidate_WSEndpointPlainAllowedInDev(t *testing.T) {
 	}
 }
 
-func TestValidate_MissingWSToken(t *testing.T) {
+func TestValidate_EmptyWSToken_WarnsButPasses(t *testing.T) {
 	cfg := validConfig()
 	cfg.WSToken = ""
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error for missing ws_token")
-	}
-	if !contains(err.Error(), "ws_token") {
-		t.Errorf("expected error to mention ws_token, got: %v", err)
+	if err != nil {
+		t.Errorf("expected no error for empty ws_token (should warn only), got: %v", err)
 	}
 }
 
@@ -331,7 +332,8 @@ func TestValidate_MissingMultipleFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing fields")
 	}
-	for _, field := range []string{"agent_id", "ws_token", "dashboard_url"} {
+	// ws_token no longer causes a validation error (just a warning)
+	for _, field := range []string{"agent_id", "dashboard_url"} {
 		if !contains(err.Error(), field) {
 			t.Errorf("expected error to mention %q, got: %v", field, err)
 		}
@@ -388,5 +390,214 @@ func TestSave_ErrorOnRestrictedPath(t *testing.T) {
 	}
 	if !contains(err.Error(), "creating config dir") && !contains(err.Error(), "writing config") {
 		t.Errorf("expected config dir or write error, got: %v", err)
+	}
+}
+
+func TestMigrate_OldConfigGetsMigrated(t *testing.T) {
+	saveCalled := false
+	origSave := saveFunc
+	saveFunc = func(c *Config) error {
+		saveCalled = true
+		return nil
+	}
+	defer func() { saveFunc = origSave }()
+
+	cfg := &Config{
+		AgentID:           "ag_old",
+		AssignedIP:        "10.99.0.5",
+		DashboardEndpoint: "1.2.3.4:51820",
+		WSEndpoint:        "wss://10.99.0.1/ws/agent",
+		WireGuardPrivKey:  "privkey",
+		WireGuardPubKey:   "pubkey",
+		DashboardURL:      "https://dash.example.com",
+		ConfigVersion:     0, // old config, no version
+	}
+
+	if err := cfg.Migrate(); err != nil {
+		t.Fatalf("Migrate() error: %v", err)
+	}
+
+	if cfg.ConfigVersion != CurrentConfigVersion {
+		t.Errorf("expected config_version %d, got %d", CurrentConfigVersion, cfg.ConfigVersion)
+	}
+	if !saveCalled {
+		t.Error("expected Save to be called during migration")
+	}
+}
+
+func TestMigrate_CurrentConfigUntouched(t *testing.T) {
+	saveCalled := false
+	origSave := saveFunc
+	saveFunc = func(c *Config) error {
+		saveCalled = true
+		return nil
+	}
+	defer func() { saveFunc = origSave }()
+
+	cfg := validConfig()
+	cfg.ConfigVersion = CurrentConfigVersion
+
+	if err := cfg.Migrate(); err != nil {
+		t.Fatalf("Migrate() error: %v", err)
+	}
+
+	if saveCalled {
+		t.Error("Save should not be called when config is already at current version")
+	}
+	if cfg.ConfigVersion != CurrentConfigVersion {
+		t.Errorf("config_version should remain %d, got %d", CurrentConfigVersion, cfg.ConfigVersion)
+	}
+}
+
+func TestMigrate_SaveError(t *testing.T) {
+	origSave := saveFunc
+	saveFunc = func(c *Config) error {
+		return fmt.Errorf("disk full")
+	}
+	defer func() { saveFunc = origSave }()
+
+	cfg := &Config{
+		AgentID:       "ag_err",
+		ConfigVersion: 0,
+	}
+
+	err := cfg.Migrate()
+	if err == nil {
+		t.Fatal("expected error when save fails")
+	}
+	if !contains(err.Error(), "disk full") {
+		t.Errorf("expected 'disk full' in error, got: %v", err)
+	}
+}
+
+func TestConfig_ConfigVersionInYAML(t *testing.T) {
+	cfg := validConfig()
+	cfg.ConfigVersion = 1
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var loaded Config
+	if err := yaml.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if loaded.ConfigVersion != 1 {
+		t.Errorf("expected config_version 1, got %d", loaded.ConfigVersion)
+	}
+}
+
+func TestConfig_OldYAMLWithoutVersion(t *testing.T) {
+	// Simulate an old config file that has no config_version field
+	yamlData := []byte(`agent_id: ag_legacy
+assigned_ip: 10.99.0.5
+dashboard_endpoint: 1.2.3.4:51820
+ws_endpoint: "wss://10.99.0.1/ws/agent"
+ws_token: wst_old
+wireguard_private_key: privkey
+wireguard_public_key: pubkey
+dashboard_url: "https://dash.example.com"
+`)
+
+	var cfg Config
+	if err := yaml.Unmarshal(yamlData, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if cfg.ConfigVersion != 0 {
+		t.Errorf("expected config_version 0 for old YAML, got %d", cfg.ConfigVersion)
+	}
+	if cfg.AgentID != "ag_legacy" {
+		t.Errorf("expected agent_id ag_legacy, got %s", cfg.AgentID)
+	}
+}
+
+func TestApplyPartialUpdate_AllFieldsChanged(t *testing.T) {
+	cfg := validConfig()
+	changed := cfg.ApplyPartialUpdate("wss://new-endpoint/ws", "wst_newtoken", "https://new-dashboard.io")
+	if !changed {
+		t.Error("expected changed=true when all fields differ")
+	}
+	if cfg.WSEndpoint != "wss://new-endpoint/ws" {
+		t.Errorf("WSEndpoint = %s, want wss://new-endpoint/ws", cfg.WSEndpoint)
+	}
+	if cfg.WSToken != "wst_newtoken" {
+		t.Errorf("WSToken = %s, want wst_newtoken", cfg.WSToken)
+	}
+	if cfg.DashboardURL != "https://new-dashboard.io" {
+		t.Errorf("DashboardURL = %s, want https://new-dashboard.io", cfg.DashboardURL)
+	}
+}
+
+func TestApplyPartialUpdate_EmptyFieldsSkipped(t *testing.T) {
+	cfg := validConfig()
+	origWS := cfg.WSEndpoint
+	origToken := cfg.WSToken
+	origURL := cfg.DashboardURL
+
+	changed := cfg.ApplyPartialUpdate("", "", "")
+	if changed {
+		t.Error("expected changed=false when all fields are empty")
+	}
+	if cfg.WSEndpoint != origWS {
+		t.Errorf("WSEndpoint changed unexpectedly to %s", cfg.WSEndpoint)
+	}
+	if cfg.WSToken != origToken {
+		t.Errorf("WSToken changed unexpectedly to %s", cfg.WSToken)
+	}
+	if cfg.DashboardURL != origURL {
+		t.Errorf("DashboardURL changed unexpectedly to %s", cfg.DashboardURL)
+	}
+}
+
+func TestApplyPartialUpdate_SameValuesNotChanged(t *testing.T) {
+	cfg := validConfig()
+	changed := cfg.ApplyPartialUpdate(cfg.WSEndpoint, cfg.WSToken, cfg.DashboardURL)
+	if changed {
+		t.Error("expected changed=false when values are identical")
+	}
+}
+
+func TestApplyPartialUpdate_PartialUpdate(t *testing.T) {
+	cfg := validConfig()
+	origWS := cfg.WSEndpoint
+	origURL := cfg.DashboardURL
+
+	changed := cfg.ApplyPartialUpdate("", "wst_onlytokenchanged", "")
+	if !changed {
+		t.Error("expected changed=true when token differs")
+	}
+	if cfg.WSToken != "wst_onlytokenchanged" {
+		t.Errorf("WSToken = %s, want wst_onlytokenchanged", cfg.WSToken)
+	}
+	if cfg.WSEndpoint != origWS {
+		t.Errorf("WSEndpoint should not change, got %s", cfg.WSEndpoint)
+	}
+	if cfg.DashboardURL != origURL {
+		t.Errorf("DashboardURL should not change, got %s", cfg.DashboardURL)
+	}
+}
+
+func TestApplyPartialUpdate_OnlyWSEndpoint(t *testing.T) {
+	cfg := validConfig()
+	changed := cfg.ApplyPartialUpdate("wss://different/ws", "", "")
+	if !changed {
+		t.Error("expected changed=true")
+	}
+	if cfg.WSEndpoint != "wss://different/ws" {
+		t.Errorf("WSEndpoint = %s, want wss://different/ws", cfg.WSEndpoint)
+	}
+}
+
+func TestApplyPartialUpdate_OnlyDashboardURL(t *testing.T) {
+	cfg := validConfig()
+	changed := cfg.ApplyPartialUpdate("", "", "https://other-dash.io")
+	if !changed {
+		t.Error("expected changed=true")
+	}
+	if cfg.DashboardURL != "https://other-dash.io" {
+		t.Errorf("DashboardURL = %s, want https://other-dash.io", cfg.DashboardURL)
 	}
 }

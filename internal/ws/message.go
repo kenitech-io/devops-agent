@@ -15,6 +15,7 @@ const (
 	TypeCommandResult   = "command_result"
 	TypeCommandStream   = "command_stream"
 	TypeCommandComplete = "command_complete"
+	TypeConfigBackup    = "config_backup"
 	TypePong            = "pong"
 	TypeError           = "error"
 )
@@ -22,6 +23,7 @@ const (
 // Message types received from the dashboard.
 const (
 	TypeCommandRequest  = "command_request"
+	TypeConfigUpdate    = "config_update"
 	TypeUpdateAvailable = "update_available"
 	TypePing            = "ping"
 )
@@ -134,6 +136,25 @@ type ErrorPayload struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	RequestID string `json:"requestId,omitempty"`
+}
+
+// ConfigBackupPayload is sent to the dashboard on first connect.
+// It contains non-secret config fields so the dashboard can track agent state.
+type ConfigBackupPayload struct {
+	AgentID       string `json:"agentId"`
+	AssignedIP    string `json:"assignedIp"`
+	WSEndpoint    string `json:"wsEndpoint"`
+	DashboardURL  string `json:"dashboardUrl"`
+	AgentVersion  string `json:"agentVersion"`
+	ConfigVersion int    `json:"configVersion"`
+}
+
+// ConfigUpdatePayload is received from the dashboard to update agent config.
+type ConfigUpdatePayload struct {
+	WSEndpoint   string `json:"wsEndpoint,omitempty"`
+	WSToken      string `json:"wsToken,omitempty"`
+	DashboardURL string `json:"dashboardUrl,omitempty"`
+	RestartAfter bool   `json:"restartAfter"`
 }
 
 // NewMessage creates a new message with a generated ID and current timestamp.

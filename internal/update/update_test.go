@@ -12,6 +12,62 @@ import (
 	"time"
 )
 
+func TestPreflightChecks_PassesOnTestMachine(t *testing.T) {
+	// On a typical dev/test machine, disk space and the binary path check
+	// should pass. systemctl may or may not be present, so we stub executableFunc
+	// to point at a writable temp dir and accept that systemctl may be missing.
+	tmpDir := t.TempDir()
+	fakeExe := tmpDir + "/keni-agent"
+	os.WriteFile(fakeExe, []byte("fake"), 0755)
+
+	origExec := executableFunc
+	executableFunc = func() (string, error) { return fakeExe, nil }
+	defer func() { executableFunc = origExec }()
+
+	err := preflightChecks()
+	// On macOS/CI, systemctl will not exist. That is expected.
+	if err != nil {
+		if !contains(err.Error(), "systemctl") {
+			t.Errorf("unexpected preflight error (not systemctl): %v", err)
+		}
+		t.Logf("preflight failed on systemctl (expected on macOS): %v", err)
+		return
+	}
+	// If we get here, all checks passed (Linux with systemctl).
+}
+
+func TestPreflightChecks_NonExistentDiskPath(t *testing.T) {
+	// preflightChecks uses a hardcoded /usr/local/bin for disk space.
+	// We cannot easily override that, but we can test the disk space logic
+	// indirectly by verifying the error when the path does not exist
+	// through the stat call. Since /usr/local/bin almost always exists,
+	// we test a path that does not exist by temporarily overriding the
+	// executable path to a non-existent directory.
+	origExec := executableFunc
+	executableFunc = func() (string, error) {
+		return "/nonexistent-keni-path-xyz/keni-agent", nil
+	}
+	defer func() { executableFunc = origExec }()
+
+	err := preflightChecks()
+	if err == nil {
+		t.Error("expected preflight error for non-existent binary path")
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchStr(s, substr)
+}
+
+func searchStr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 func TestVerifyChecksum_Valid(t *testing.T) {
 	content := []byte("test binary content")
 	hash := sha256.Sum256(content)
@@ -622,12 +678,14 @@ func setupUpdateTest(t *testing.T, currentBinaryContent string, bgWait time.Dura
 
 	origRestart := restartFunc
 	origExec := executableFunc
+	origPreflight := preflightFunc
 	origURL := HealthCheckURL
 	origTimeout := HealthCheckTimeout
 	origInterval := HealthCheckInterval
 
 	executableFunc = func() (string, error) { return currentPath, nil }
 	restartFunc = func() error { return nil }
+	preflightFunc = func() error { return nil }
 	HealthCheckTimeout = 500 * time.Millisecond
 	HealthCheckInterval = 50 * time.Millisecond
 
@@ -637,6 +695,7 @@ func setupUpdateTest(t *testing.T, currentBinaryContent string, bgWait time.Dura
 		time.Sleep(bgWait)
 		restartFunc = origRestart
 		executableFunc = origExec
+		preflightFunc = origPreflight
 		HealthCheckURL = origURL
 		HealthCheckTimeout = origTimeout
 		HealthCheckInterval = origInterval

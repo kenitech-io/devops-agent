@@ -9,9 +9,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
+
+// minDiskSpaceBytes is the minimum free disk space required for an update (100 MB).
+const minDiskSpaceBytes = 100 * 1024 * 1024
 
 // HealthCheckURL is the local health endpoint used to verify the agent after update.
 var HealthCheckURL = "http://127.0.0.1:9100/healthz"
@@ -28,9 +33,53 @@ var restartFunc = restartSystemd
 // executableFunc returns the path of the current executable. Override in tests.
 var executableFunc = os.Executable
 
+// preflightFunc is the function called before update. Override in tests.
+var preflightFunc = preflightChecks
+
+// preflightChecks verifies the system is ready for a self-update:
+// sufficient disk space, writable binary path, and systemctl available.
+func preflightChecks() error {
+	// 1. Check disk space on the partition containing /usr/local/bin/
+	binDir := "/usr/local/bin"
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(binDir, &stat); err != nil {
+		return fmt.Errorf("preflight: cannot stat filesystem at %s: %w", binDir, err)
+	}
+	freeBytes := stat.Bavail * uint64(stat.Bsize)
+	if freeBytes < minDiskSpaceBytes {
+		return fmt.Errorf("preflight: insufficient disk space on %s: %d bytes free, need at least %d", binDir, freeBytes, minDiskSpaceBytes)
+	}
+
+	// 2. Check that the current binary's parent directory is writable
+	currentPath, err := executableFunc()
+	if err != nil {
+		return fmt.Errorf("preflight: cannot determine executable path: %w", err)
+	}
+	parentDir := filepath.Dir(currentPath)
+	testFile := filepath.Join(parentDir, ".keni-update-check")
+	f, err := os.Create(testFile)
+	if err != nil {
+		return fmt.Errorf("preflight: binary directory %s is not writable: %w", parentDir, err)
+	}
+	f.Close()
+	os.Remove(testFile)
+
+	// 3. Check that systemctl is available in PATH
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return fmt.Errorf("preflight: systemctl not found in PATH: %w", err)
+	}
+
+	slog.Info("preflight checks passed", "free_bytes", freeBytes, "binary_dir", parentDir)
+	return nil
+}
+
 // Update downloads a new agent binary, verifies its checksum, replaces the
 // current binary with rollback support, and restarts via systemd.
 func Update(downloadURL, expectedChecksum string) error {
+	if err := preflightFunc(); err != nil {
+		return err
+	}
+
 	slog.Info("starting self-update", "url", downloadURL)
 
 	// Download to a temp file

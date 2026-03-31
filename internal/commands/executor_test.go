@@ -929,3 +929,294 @@ func TestBuildCommand_ParamsAsWrongJSON(t *testing.T) {
 		t.Fatal("expected error for null params")
 	}
 }
+
+// --- Tests for agent_logs, system_logs, agent_restart, agent_uninstall ---
+
+func TestBuildCommand_AgentLogs_Default(t *testing.T) {
+	// nil params should use default of 100 lines
+	cmd, err := buildCommand(context.Background(), "agent_logs", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := []string{"journalctl", "-u", "keni-agent", "--no-pager", "-n", "100"}
+	if len(cmd.Args) != len(expected) {
+		t.Fatalf("args: got %v, want %v", cmd.Args, expected)
+	}
+	for i, arg := range expected {
+		if cmd.Args[i] != arg {
+			t.Errorf("arg[%d]: got %q, want %q", i, cmd.Args[i], arg)
+		}
+	}
+}
+
+func TestBuildCommand_AgentLogs_CustomLines(t *testing.T) {
+	params, _ := json.Marshal(map[string]interface{}{"lines": 500})
+	cmd, err := buildCommand(context.Background(), "agent_logs", params)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd.Args[len(cmd.Args)-1] != "500" {
+		t.Errorf("expected lines=500, got %v", cmd.Args)
+	}
+}
+
+func TestBuildCommand_AgentLogs_BoundaryLines(t *testing.T) {
+	tests := []struct {
+		desc    string
+		lines   int
+		wantErr bool
+	}{
+		{"zero", 0, true},
+		{"negative", -1, true},
+		{"min_valid", 1, false},
+		{"max_valid", 1000, false},
+		{"over_max", 1001, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			params, _ := json.Marshal(map[string]interface{}{"lines": tt.lines})
+			_, err := buildCommand(context.Background(), "agent_logs", params)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for lines=%d", tt.lines)
+				}
+				if !strings.Contains(err.Error(), "INVALID_PARAMS") {
+					t.Errorf("error %q should contain INVALID_PARAMS", err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error for lines=%d: %v", tt.lines, err)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildCommand_AgentLogs_InvalidParamType(t *testing.T) {
+	params, _ := json.Marshal(map[string]interface{}{"lines": "not_a_number"})
+	_, err := buildCommand(context.Background(), "agent_logs", params)
+	if err == nil {
+		t.Fatal("expected error for string lines param")
+	}
+	if !strings.Contains(err.Error(), "INVALID_PARAMS") {
+		t.Errorf("expected INVALID_PARAMS, got: %v", err)
+	}
+}
+
+func TestBuildCommand_SystemLogs_Default(t *testing.T) {
+	cmd, err := buildCommand(context.Background(), "system_logs", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := []string{"journalctl", "--no-pager", "-n", "100"}
+	if len(cmd.Args) != len(expected) {
+		t.Fatalf("args: got %v, want %v", cmd.Args, expected)
+	}
+	for i, arg := range expected {
+		if cmd.Args[i] != arg {
+			t.Errorf("arg[%d]: got %q, want %q", i, cmd.Args[i], arg)
+		}
+	}
+}
+
+func TestBuildCommand_SystemLogs_CustomLines(t *testing.T) {
+	params, _ := json.Marshal(map[string]interface{}{"lines": 250})
+	cmd, err := buildCommand(context.Background(), "system_logs", params)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd.Args[len(cmd.Args)-1] != "250" {
+		t.Errorf("expected lines=250, got %v", cmd.Args)
+	}
+}
+
+func TestBuildCommand_SystemLogs_BoundaryLines(t *testing.T) {
+	tests := []struct {
+		desc    string
+		lines   int
+		wantErr bool
+	}{
+		{"zero", 0, true},
+		{"negative", -1, true},
+		{"min_valid", 1, false},
+		{"max_valid", 1000, false},
+		{"over_max", 1001, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			params, _ := json.Marshal(map[string]interface{}{"lines": tt.lines})
+			_, err := buildCommand(context.Background(), "system_logs", params)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for lines=%d", tt.lines)
+				}
+				if !strings.Contains(err.Error(), "INVALID_PARAMS") {
+					t.Errorf("error %q should contain INVALID_PARAMS", err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error for lines=%d: %v", tt.lines, err)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildCommand_AgentRestart_MissingConfirm(t *testing.T) {
+	_, err := buildCommand(context.Background(), "agent_restart", nil)
+	if err == nil {
+		t.Fatal("expected error for missing confirm param")
+	}
+	if !strings.Contains(err.Error(), "INVALID_PARAMS") {
+		t.Errorf("expected INVALID_PARAMS, got: %v", err)
+	}
+}
+
+func TestBuildCommand_AgentRestart_WrongConfirm(t *testing.T) {
+	tests := []string{"no", "YES", "y", "", "maybe"}
+	for _, val := range tests {
+		t.Run(val, func(t *testing.T) {
+			params, _ := json.Marshal(map[string]string{"confirm": val})
+			_, err := buildCommand(context.Background(), "agent_restart", params)
+			if err == nil {
+				t.Fatalf("expected error for confirm=%q", val)
+			}
+			if !strings.Contains(err.Error(), "INVALID_PARAMS") {
+				t.Errorf("expected INVALID_PARAMS, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestExecute_AgentRestart_Valid(t *testing.T) {
+	params, _ := json.Marshal(map[string]string{"confirm": "yes"})
+	result, err := Execute(context.Background(), "agent_restart", params)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", result.ExitCode)
+	}
+	if !strings.Contains(result.Stdout, "agent restart scheduled") {
+		t.Errorf("expected scheduled message, got: %q", result.Stdout)
+	}
+}
+
+func TestBuildCommand_AgentUninstall_MissingConfirm(t *testing.T) {
+	_, err := buildCommand(context.Background(), "agent_uninstall", nil)
+	if err == nil {
+		t.Fatal("expected error for missing confirm param")
+	}
+	if !strings.Contains(err.Error(), "INVALID_PARAMS") {
+		t.Errorf("expected INVALID_PARAMS, got: %v", err)
+	}
+}
+
+func TestBuildCommand_AgentUninstall_WrongConfirm(t *testing.T) {
+	tests := []string{"yes", "no", "uninstall", "", "YES-UNINSTALL", "yes-Uninstall"}
+	for _, val := range tests {
+		t.Run(val, func(t *testing.T) {
+			params, _ := json.Marshal(map[string]string{"confirm": val})
+			_, err := buildCommand(context.Background(), "agent_uninstall", params)
+			if err == nil {
+				t.Fatalf("expected error for confirm=%q", val)
+			}
+			if !strings.Contains(err.Error(), "INVALID_PARAMS") {
+				t.Errorf("expected INVALID_PARAMS, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestExecute_AgentUninstall_Valid(t *testing.T) {
+	params, _ := json.Marshal(map[string]string{"confirm": "yes-uninstall"})
+	result, err := Execute(context.Background(), "agent_uninstall", params)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", result.ExitCode)
+	}
+	if !strings.Contains(result.Stdout, "agent shutdown scheduled") {
+		t.Errorf("expected scheduled message, got: %q", result.Stdout)
+	}
+}
+
+func TestExtractOptionalIntParam(t *testing.T) {
+	tests := []struct {
+		desc       string
+		params     json.RawMessage
+		key        string
+		defaultVal int
+		want       int
+		wantErr    string
+	}{
+		{
+			desc:       "nil params returns default",
+			params:     nil,
+			key:        "lines",
+			defaultVal: 100,
+			want:       100,
+		},
+		{
+			desc:       "empty object returns default",
+			params:     json.RawMessage(`{}`),
+			key:        "lines",
+			defaultVal: 100,
+			want:       100,
+		},
+		{
+			desc:       "key present uses value",
+			params:     json.RawMessage(`{"lines":50}`),
+			key:        "lines",
+			defaultVal: 100,
+			want:       50,
+		},
+		{
+			desc:       "wrong type returns error",
+			params:     json.RawMessage(`{"lines":"abc"}`),
+			key:        "lines",
+			defaultVal: 100,
+			wantErr:    "must be a number",
+		},
+		{
+			desc:       "invalid JSON returns error",
+			params:     json.RawMessage(`not json`),
+			key:        "lines",
+			defaultVal: 100,
+			wantErr:    "parsing params",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			val, err := extractOptionalIntParam(tt.params, tt.key, tt.defaultVal)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.wantErr)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if val != tt.want {
+					t.Errorf("got %d, want %d", val, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestIsStreamingAction_NewActions(t *testing.T) {
+	newActions := []string{"agent_logs", "system_logs", "agent_restart", "agent_uninstall"}
+	for _, action := range newActions {
+		if IsStreamingAction(action) {
+			t.Errorf("%s should not be streaming", action)
+		}
+	}
+}

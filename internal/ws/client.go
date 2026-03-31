@@ -31,6 +31,13 @@ type Client struct {
 
 	sendCh chan []byte
 
+	// Buffered messages for reconnect. When the send channel is full and the
+	// message is a heartbeat or status_report, we store it here so it can be
+	// flushed immediately after reconnecting.
+	pendingMu           sync.Mutex
+	pendingHeartbeat    []byte
+	pendingStatusReport []byte
+
 	// Backoff state
 	backoffStep       int
 	disconnectedAt    time.Time
@@ -75,7 +82,9 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
-// Send sends a message to the dashboard.
+// Send sends a message to the dashboard. If the send buffer is full and the
+// message is a heartbeat or status_report, it is stored as a pending message
+// so it can be flushed on the next successful reconnect.
 func (c *Client) Send(msg *Message) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -86,6 +95,18 @@ func (c *Client) Send(msg *Message) error {
 	case c.sendCh <- data:
 		return nil
 	default:
+		// Channel full. Buffer heartbeat/status_report for reconnect flush.
+		if msg.Type == TypeHeartbeat || msg.Type == TypeStatusReport {
+			c.pendingMu.Lock()
+			if msg.Type == TypeHeartbeat {
+				c.pendingHeartbeat = data
+			} else {
+				c.pendingStatusReport = data
+			}
+			c.pendingMu.Unlock()
+			slog.Debug("buffered message for reconnect", "type", msg.Type)
+			return nil
+		}
 		return fmt.Errorf("send buffer full, dropping message type=%s", msg.Type)
 	}
 }
@@ -129,6 +150,9 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	if c.onConnect != nil {
 		c.onConnect(true)
 	}
+
+	// Flush any buffered heartbeat/status_report from while disconnected.
+	c.flushPending()
 
 	closeCh := make(chan struct{})
 	errCh := make(chan error, 2)
@@ -184,6 +208,34 @@ func (c *Client) writeLoop(ctx context.Context, conn *websocket.Conn, closeCh <-
 			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 				return fmt.Errorf("writing message: %w", err)
 			}
+		}
+	}
+}
+
+// flushPending drains any buffered heartbeat or status_report into the send
+// channel so they are delivered immediately after reconnecting.
+func (c *Client) flushPending() {
+	c.pendingMu.Lock()
+	hb := c.pendingHeartbeat
+	sr := c.pendingStatusReport
+	c.pendingHeartbeat = nil
+	c.pendingStatusReport = nil
+	c.pendingMu.Unlock()
+
+	if hb != nil {
+		select {
+		case c.sendCh <- hb:
+			slog.Debug("flushed pending heartbeat on reconnect")
+		default:
+			slog.Warn("could not flush pending heartbeat, send buffer full")
+		}
+	}
+	if sr != nil {
+		select {
+		case c.sendCh <- sr:
+			slog.Debug("flushed pending status_report on reconnect")
+		default:
+			slog.Warn("could not flush pending status_report, send buffer full")
 		}
 	}
 }

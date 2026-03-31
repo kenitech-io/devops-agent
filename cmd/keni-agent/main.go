@@ -88,12 +88,14 @@ func runAgent(ctx context.Context, cfg *config.Config) {
 
 	var client *ws.Client
 	handler := func(msg *ws.Message) {
-		handleDashboardMessage(ctx, client, msg, &cmdMu, &cmdWg)
+		handleDashboardMessage(ctx, client, cfg, msg, &cmdMu, &cmdWg)
 	}
 	client = ws.NewClient(cfg.WSEndpoint, cfg.AgentID, cfg.WSToken, handler)
 	client.SetConnectionCallback(func(connected bool) {
 		metrics.SetWSConnected(connected)
-		if !connected {
+		if connected {
+			sendConfigBackup(client, cfg)
+		} else {
 			metrics.WebSocketReconnections.Inc()
 		}
 	})
@@ -185,7 +187,64 @@ func sendStatusReport(client *ws.Client) {
 	}
 }
 
-func handleDashboardMessage(ctx context.Context, client *ws.Client, msg *ws.Message, cmdMu *sync.Mutex, cmdWg *sync.WaitGroup) {
+func sendConfigBackup(client *ws.Client, cfg *config.Config) {
+	payload := ws.ConfigBackupPayload{
+		AgentID:       cfg.AgentID,
+		AssignedIP:    cfg.AssignedIP,
+		WSEndpoint:    cfg.WSEndpoint,
+		DashboardURL:  cfg.DashboardURL,
+		AgentVersion:  version,
+		ConfigVersion: cfg.ConfigVersion,
+	}
+
+	msg, err := ws.NewMessage(ws.TypeConfigBackup, payload)
+	if err != nil {
+		slog.Error("creating config_backup message", "error", err)
+		return
+	}
+
+	if err := client.Send(msg); err != nil {
+		slog.Warn("sending config_backup", "error", err)
+	} else {
+		slog.Info("sent config_backup to dashboard")
+	}
+}
+
+func handleConfigUpdate(cfg *config.Config, msg *ws.Message) {
+	var payload ws.ConfigUpdatePayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		slog.Error("parsing config_update", "error", err)
+		return
+	}
+
+	changed := cfg.ApplyPartialUpdate(payload.WSEndpoint, payload.WSToken, payload.DashboardURL)
+	if !changed {
+		slog.Info("config_update received but no fields changed")
+		return
+	}
+
+	if err := cfg.Save(); err != nil {
+		slog.Error("saving updated config", "error", err)
+		return
+	}
+
+	slog.Info("config updated from dashboard",
+		"ws_endpoint_changed", payload.WSEndpoint != "",
+		"ws_token_changed", payload.WSToken != "",
+		"dashboard_url_changed", payload.DashboardURL != "",
+	)
+
+	if payload.RestartAfter {
+		slog.Info("restart requested, scheduling restart in 2s")
+		go func() {
+			time.Sleep(2 * time.Second)
+			slog.Info("restarting agent")
+			os.Exit(0)
+		}()
+	}
+}
+
+func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.Config, msg *ws.Message, cmdMu *sync.Mutex, cmdWg *sync.WaitGroup) {
 	switch msg.Type {
 	case ws.TypePing:
 		handlePing(client, msg)
@@ -195,6 +254,8 @@ func handleDashboardMessage(ctx context.Context, client *ws.Client, msg *ws.Mess
 			defer cmdWg.Done()
 			handleCommandRequest(ctx, client, msg, cmdMu)
 		}()
+	case ws.TypeConfigUpdate:
+		handleConfigUpdate(cfg, msg)
 	case ws.TypeUpdateAvailable:
 		go handleUpdateAvailable(msg)
 	default:

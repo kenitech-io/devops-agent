@@ -18,6 +18,15 @@ import (
 
 var errSystemInfoSpecial = errors.New("system_info: handled specially")
 
+// errScheduledAction is a sentinel error type returned when a command schedules
+// a background action (e.g. restart, uninstall) and returns a message instead
+// of running a subprocess.
+type errScheduledAction string
+
+func (e errScheduledAction) Error() string {
+	return string(e)
+}
+
 // Result holds the output of a non-streaming command.
 type Result struct {
 	ExitCode   int
@@ -54,6 +63,13 @@ func Execute(ctx context.Context, action string, params json.RawMessage) (*Resul
 	cmd, err := buildCommand(ctx, action, params)
 	if errors.Is(err, errSystemInfoSpecial) {
 		return executeSystemInfo(start)
+	}
+	if scheduled, ok := err.(errScheduledAction); ok {
+		return &Result{
+			ExitCode:   0,
+			Stdout:     string(scheduled),
+			DurationMs: time.Since(start).Milliseconds(),
+		}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -286,6 +302,57 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 		}
 		return exec.CommandContext(ctx, "docker", "logs", "--tail", strconv.Itoa(lines), name), nil
 
+	case "agent_logs":
+		lines, err := extractOptionalIntParam(params, "lines", 100)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		if lines < 1 || lines > 1000 {
+			return nil, fmt.Errorf("INVALID_PARAMS: lines must be 1-1000, got %d", lines)
+		}
+		return exec.CommandContext(ctx, "journalctl", "-u", "keni-agent", "--no-pager", "-n", strconv.Itoa(lines)), nil
+
+	case "system_logs":
+		lines, err := extractOptionalIntParam(params, "lines", 100)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		if lines < 1 || lines > 1000 {
+			return nil, fmt.Errorf("INVALID_PARAMS: lines must be 1-1000, got %d", lines)
+		}
+		return exec.CommandContext(ctx, "journalctl", "--no-pager", "-n", strconv.Itoa(lines)), nil
+
+	case "agent_restart":
+		confirm, err := extractStringParam(params, "confirm")
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		if confirm != "yes" {
+			return nil, fmt.Errorf("INVALID_PARAMS: confirm parameter must be \"yes\"")
+		}
+		// Schedule restart after a 2-second delay so the response can be sent first.
+		go func() {
+			time.Sleep(2 * time.Second)
+			exec.Command("systemctl", "restart", "keni-agent").Run()
+		}()
+		return nil, errScheduledAction("agent restart scheduled in 2 seconds")
+
+	case "agent_uninstall":
+		confirm, err := extractStringParam(params, "confirm")
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		if confirm != "yes-uninstall" {
+			return nil, fmt.Errorf("INVALID_PARAMS: confirm parameter must be \"yes-uninstall\"")
+		}
+		// Schedule disable+stop after a 2-second delay so the response can be sent first.
+		go func() {
+			time.Sleep(2 * time.Second)
+			exec.Command("systemctl", "disable", "keni-agent").Run()
+			exec.Command("systemctl", "stop", "keni-agent").Run()
+		}()
+		return nil, errScheduledAction("agent shutdown scheduled in 2 seconds, service will be disabled")
+
 	default:
 		return nil, fmt.Errorf("UNKNOWN_ACTION: action %q is not in the whitelist", action)
 	}
@@ -308,6 +375,25 @@ func extractStringParam(params json.RawMessage, key string) (string, error) {
 		return "", fmt.Errorf("param %q must be a string", key)
 	}
 	return val, nil
+}
+
+func extractOptionalIntParam(params json.RawMessage, key string, defaultVal int) (int, error) {
+	if params == nil {
+		return defaultVal, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(params, &m); err != nil {
+		return 0, fmt.Errorf("parsing params: %w", err)
+	}
+	raw, ok := m[key]
+	if !ok {
+		return defaultVal, nil
+	}
+	var val float64
+	if err := json.Unmarshal(raw, &val); err != nil {
+		return 0, fmt.Errorf("param %q must be a number", key)
+	}
+	return int(val), nil
 }
 
 func extractIntParam(params json.RawMessage, key string) (int, error) {

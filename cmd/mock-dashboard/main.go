@@ -319,6 +319,12 @@ func handleAgentMessage(agentID string, conn *websocket.Conn, msg *agentWs.Messa
 		log.Printf("agent %s command complete: request=%s exit=%d duration=%dms",
 			agentID, cc.RequestID, cc.ExitCode, cc.DurationMs)
 
+	case agentWs.TypeConfigBackup:
+		var cb agentWs.ConfigBackupPayload
+		json.Unmarshal(msg.Payload, &cb)
+		log.Printf("agent %s config_backup: assigned_ip=%s, ws_endpoint=%s, dashboard_url=%s, agent_version=%s, config_version=%d",
+			agentID, cb.AssignedIP, cb.WSEndpoint, cb.DashboardURL, cb.AgentVersion, cb.ConfigVersion)
+
 	case agentWs.TypePong:
 		var pong agentWs.PongPayload
 		json.Unmarshal(msg.Payload, &pong)

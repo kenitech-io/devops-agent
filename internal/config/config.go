@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -9,6 +10,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// CurrentConfigVersion is the latest config schema version.
+const CurrentConfigVersion = 1
 
 // IsDevMode returns true when WireGuard is skipped (Tailscale/local dev).
 func IsDevMode() bool {
@@ -22,6 +26,7 @@ const (
 
 // Config holds the agent's persistent configuration.
 type Config struct {
+	ConfigVersion     int    `yaml:"config_version"`
 	AgentID           string `yaml:"agent_id"`
 	AssignedIP        string `yaml:"assigned_ip"`
 	DashboardEndpoint string `yaml:"dashboard_endpoint"`
@@ -31,6 +36,38 @@ type Config struct {
 	WireGuardPubKey   string `yaml:"wireguard_public_key"`
 	DashboardPubKey   string `yaml:"dashboard_public_key"`
 	DashboardURL      string `yaml:"dashboard_url"`
+}
+
+// saveFunc is the function used to persist config. Override in tests.
+var saveFunc func(c *Config) error
+
+func init() {
+	saveFunc = (*Config).Save
+}
+
+// Migrate updates old config files to the current schema version.
+// It sets defaults for new fields and persists the result.
+func (c *Config) Migrate() error {
+	if c.ConfigVersion >= CurrentConfigVersion {
+		return nil
+	}
+
+	slog.Info("migrating config", "from_version", c.ConfigVersion, "to_version", CurrentConfigVersion)
+
+	// Migration from v0 to v1:
+	// ws_token may be empty on old configs. That is acceptable, the agent
+	// will need to re-register with the dashboard to obtain a new token.
+	if c.ConfigVersion < 1 {
+		slog.Info("config migration v0->v1: setting config_version, ws_token may be empty (re-register required)")
+		c.ConfigVersion = 1
+	}
+
+	if err := saveFunc(c); err != nil {
+		return fmt.Errorf("saving migrated config: %w", err)
+	}
+
+	slog.Info("config migration complete", "version", c.ConfigVersion)
+	return nil
 }
 
 // Load reads the config from /etc/keni-agent/config.yml.
@@ -48,6 +85,12 @@ func Load() (*Config, error) {
 
 	if cfg.AgentID == "" {
 		return nil, fmt.Errorf("config missing agent_id")
+	}
+
+	if cfg.ConfigVersion < CurrentConfigVersion {
+		if err := cfg.Migrate(); err != nil {
+			return nil, fmt.Errorf("migrating config: %w", err)
+		}
 	}
 
 	return &cfg, nil
@@ -76,7 +119,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("ws_endpoint must use wss:// in production (ws:// only allowed in dev mode with KENI_SKIP_WIREGUARD=true)")
 	}
 	if c.WSToken == "" {
-		missing = append(missing, "ws_token")
+		slog.Warn("config: ws_token is empty, agent will need to re-register with the dashboard")
 	}
 	if c.WireGuardPrivKey == "" {
 		missing = append(missing, "wireguard_private_key")
@@ -93,6 +136,25 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config missing required fields: %s", strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// ApplyPartialUpdate applies non-empty fields from a remote config update.
+// Returns true if any field was changed.
+func (c *Config) ApplyPartialUpdate(wsEndpoint, wsToken, dashboardURL string) bool {
+	changed := false
+	if wsEndpoint != "" && wsEndpoint != c.WSEndpoint {
+		c.WSEndpoint = wsEndpoint
+		changed = true
+	}
+	if wsToken != "" && wsToken != c.WSToken {
+		c.WSToken = wsToken
+		changed = true
+	}
+	if dashboardURL != "" && dashboardURL != c.DashboardURL {
+		c.DashboardURL = dashboardURL
+		changed = true
+	}
+	return changed
 }
 
 // Save writes the config to /etc/keni-agent/config.yml with restricted permissions.

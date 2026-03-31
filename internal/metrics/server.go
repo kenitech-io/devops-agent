@@ -12,11 +12,13 @@ import (
 
 // State holds the runtime state exposed via the health endpoint.
 type State struct {
-	startTime    time.Time
-	version      string
-	agentID      string
-	wsConnected  atomic.Bool
-	lastHBTime   atomic.Int64
+	startTime          time.Time
+	version            string
+	agentID            string
+	wsConnected        atomic.Bool
+	lastHBTime         atomic.Int64
+	lastGoroutines     atomic.Int64
+	lastHeapAllocBytes atomic.Int64
 }
 
 var state = &State{
@@ -50,17 +52,30 @@ func RecordHeartbeat() {
 
 // healthResponse is the JSON body for GET /healthz.
 type healthResponse struct {
-	Status        string `json:"status"`
-	Version       string `json:"version"`
-	AgentID       string `json:"agentId"`
-	UptimeSeconds int64  `json:"uptimeSeconds"`
-	WSConnected   bool   `json:"wsConnected"`
-	LastHeartbeat int64  `json:"lastHeartbeat"`
+	Status        string  `json:"status"`
+	Version       string  `json:"version"`
+	AgentID       string  `json:"agentId"`
+	UptimeSeconds int64   `json:"uptimeSeconds"`
+	WSConnected   bool    `json:"wsConnected"`
+	LastHeartbeat int64   `json:"lastHeartbeat"`
+	Goroutines    int     `json:"goroutines"`
+	HeapAllocMb   float64 `json:"heapAllocMb"`
 }
 
 // StartServer starts the metrics and health HTTP server on the given address.
 // Typically called with "127.0.0.1:9100" to listen only on localhost.
+// It also starts a background goroutine that updates runtime metrics every 30 seconds.
 func StartServer(addr string) {
+	// Collect runtime metrics once immediately, then every 30 seconds.
+	UpdateRuntimeMetrics()
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			UpdateRuntimeMetrics()
+		}
+	}()
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/healthz", handleHealthz)
@@ -84,6 +99,9 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusServiceUnavailable
 	}
 
+	goroutines := state.lastGoroutines.Load()
+	heapBytes := state.lastHeapAllocBytes.Load()
+
 	resp := healthResponse{
 		Status:        status,
 		Version:       state.version,
@@ -91,6 +109,8 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 		UptimeSeconds: int64(time.Since(state.startTime).Seconds()),
 		WSConnected:   connected,
 		LastHeartbeat: lastHB,
+		Goroutines:    int(goroutines),
+		HeapAllocMb:   float64(heapBytes) / 1024 / 1024,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
