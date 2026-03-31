@@ -28,9 +28,7 @@ Read both docs before making any architectural decisions.
 - Config file: /etc/keni-agent/config.yml
 - Logs to stdout/journald
 
-## Feature build order
-
-Build each feature complete and functional before moving to the next:
+## Feature build order (all complete)
 
 1. Install script and systemd service
 2. Registration flow
@@ -42,7 +40,24 @@ Build each feature complete and functional before moving to the next:
 
 ## Implementation issue
 
-https://github.com/kenitech-io/devops-agent/issues/1
+https://github.com/kenitech-io/devops-agent/issues/1 (closed)
+
+## Dev mode
+
+For development over Tailscale without WireGuard, set these env vars in /etc/keni-agent/env:
+- `KENI_SKIP_WIREGUARD=true` - skips keypair generation and wg0 setup
+- `KENI_WS_ENDPOINT=ws://<tailscale-ip>:8080/ws/agent` - connects directly via Tailscale
+- `KENI_DASHBOARD_URL=http://<tailscale-ip>:3002` - points to dev dashboard
+
+The dashboard auto-detects localhost and includes --dashboard-url in the install command.
+
+## Deployment
+
+- Repo is public (agent binary has no secrets)
+- Binaries published via GitHub Releases (goreleaser on tag push)
+- Install script downloads from GitHub Releases, defaults to dashboard.kenitech.io
+- Pi5 demo: agent deployed via Tailscale, connected to local dashboard
+- SSH key for Ansible: ~/.ssh/keni_dashboard (ed25519), public key in dashboard .env as DASHBOARD_SSH_PUBLIC_KEY
 
 ## Conventions
 
