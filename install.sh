@@ -2,7 +2,8 @@
 set -e
 
 # Keni Agent installer
-# Usage: curl -s https://agent.kenitech.io/install.sh | sh -s -- --token <TOKEN> --dashboard-url <URL> --ssh-key <PUBKEY>
+# Usage: curl -fsSL https://raw.githubusercontent.com/kenitech-io/devops-agent/main/install.sh | sh -s -- --token <TOKEN> --ssh-key <PUBKEY>
+# Optional: --dashboard-url <URL> (defaults to https://dashboard.kenitech.io)
 
 AGENT_USER="keni"
 INSTALL_DIR="/usr/local/bin"
@@ -51,7 +52,7 @@ if [ -z "$TOKEN" ]; then
 fi
 
 if [ -z "$DASHBOARD_URL" ]; then
-    error "Missing required argument: --dashboard-url"
+    DASHBOARD_URL="https://dashboard.kenitech.io"
 fi
 
 if [ -z "$SSH_KEY" ]; then
