@@ -18,6 +18,41 @@ func mustNewRepo(t *testing.T, url, token, path string) *Repo {
 	return r
 }
 
+// setupTestRepo creates a bare git repo with an initial commit on the "main"
+// branch. Returns (remoteDir, workDir) where workDir is a checked-out clone
+// that can be used to push further commits.
+func setupTestRepo(t *testing.T, files map[string]string) (string, string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	remoteDir := t.TempDir()
+	run(t, remoteDir, "git", "init", "--bare", "--initial-branch=main")
+
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", remoteDir, ".")
+	run(t, workDir, "git", "checkout", "-b", "main")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+
+	for path, content := range files {
+		full := filepath.Join(workDir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run(t, workDir, "git", "add", "-A")
+	run(t, workDir, "git", "commit", "-m", "initial")
+	run(t, workDir, "git", "push", "-u", "origin", "main")
+
+	return remoteDir, workDir
+}
+
 func TestNewRepo_HTTPS(t *testing.T) {
 	r := mustNewRepo(t, "https://github.com/org/repo", "token123", "/tmp/test")
 	if r.url != "https://github.com/org/repo" {
@@ -52,7 +87,6 @@ func TestNewRepo_RejectsHTTP(t *testing.T) {
 }
 
 func TestNewRepo_AllowsLocalPath(t *testing.T) {
-	// Local bare repo paths (used in tests) should be allowed.
 	r, err := NewRepo("/tmp/bare-repo", "", "/tmp/clone")
 	if err != nil {
 		t.Fatalf("expected local path to be allowed: %v", err)
@@ -114,7 +148,6 @@ func TestClone_AlreadyCloned(t *testing.T) {
 	tmpDir := t.TempDir()
 	repoDir := filepath.Join(tmpDir, "repo")
 
-	// Create a fake .git directory
 	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
 	}
@@ -127,7 +160,6 @@ func TestClone_AlreadyCloned(t *testing.T) {
 
 func TestClone_ParentDirCreationFails(t *testing.T) {
 	tmpDir := t.TempDir()
-	// Create a file where a directory should be
 	blocker := filepath.Join(tmpDir, "blocker")
 	if err := os.WriteFile(blocker, []byte("x"), 0644); err != nil {
 		t.Fatal(err)
@@ -162,31 +194,9 @@ func TestClone_InvalidRemote(t *testing.T) {
 // TestCloneAndPull creates a real local git repo, clones it, makes a change,
 // and verifies Pull detects the update.
 func TestCloneAndPull(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-
-	// Create a bare "remote" repo
-	remoteDir := t.TempDir()
-	run(t, remoteDir, "git", "init", "--bare")
-
-	// Create a working copy to push an initial commit
-	workDir := t.TempDir()
-	run(t, workDir, "git", "clone", remoteDir, ".")
-	run(t, workDir, "git", "config", "user.email", "test@test.com")
-	run(t, workDir, "git", "config", "user.name", "Test")
-
-	// Create initial structure: core/traefik/docker-compose.yml
-	coreTraefik := filepath.Join(workDir, "core", "traefik")
-	if err := os.MkdirAll(coreTraefik, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(coreTraefik, "docker-compose.yml"), []byte("services: {}"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	run(t, workDir, "git", "add", "-A")
-	run(t, workDir, "git", "commit", "-m", "initial")
-	run(t, workDir, "git", "push", "origin", "main")
+	remoteDir, workDir := setupTestRepo(t, map[string]string{
+		"core/traefik/docker-compose.yml": "services: {}",
+	})
 
 	// Clone using our Repo
 	cloneDir := filepath.Join(t.TempDir(), "clone")
@@ -225,6 +235,7 @@ func TestCloneAndPull(t *testing.T) {
 	}
 
 	// Push a new commit from workDir
+	coreTraefik := filepath.Join(workDir, "core", "traefik")
 	if err := os.WriteFile(filepath.Join(coreTraefik, "docker-compose.yml"), []byte("services:\n  traefik:\n    image: traefik:v3"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -251,26 +262,10 @@ func TestCloneAndPull(t *testing.T) {
 }
 
 func TestClone_StripsCredentialFromRemote(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
+	remoteDir, _ := setupTestRepo(t, map[string]string{
+		"README.md": "test",
+	})
 
-	// Create a bare remote
-	remoteDir := t.TempDir()
-	run(t, remoteDir, "git", "init", "--bare")
-
-	workDir := t.TempDir()
-	run(t, workDir, "git", "clone", remoteDir, ".")
-	run(t, workDir, "git", "config", "user.email", "test@test.com")
-	run(t, workDir, "git", "config", "user.name", "Test")
-	if err := os.WriteFile(filepath.Join(workDir, "README.md"), []byte("test"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	run(t, workDir, "git", "add", "-A")
-	run(t, workDir, "git", "commit", "-m", "init")
-	run(t, workDir, "git", "push", "origin", "main")
-
-	// Clone without token (local path), then verify stripCredentialFromRemote works
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 	r := mustNewRepo(t, remoteDir, "", cloneDir)
 	if err := r.Clone(); err != nil {
@@ -323,13 +318,10 @@ func TestComponentDirs_PathTraversal(t *testing.T) {
 	tmpDir := t.TempDir()
 	r := mustNewRepo(t, "https://github.com/org/repo", "", tmpDir)
 
-	// Even if we bypass ValidRoles check, the path check should catch traversal.
-	// Test with a valid role that has no directory.
 	_, err := r.ComponentDirs("../../etc")
 	if err == nil {
 		t.Fatal("expected error for path traversal")
 	}
-	// Should be caught by role validation first.
 	if !strings.Contains(err.Error(), "invalid role") {
 		t.Errorf("expected invalid role error, got: %v", err)
 	}
@@ -393,7 +385,6 @@ func TestComponentDirs_SkipsNonCompose(t *testing.T) {
 	tmpDir := t.TempDir()
 	coreDir := filepath.Join(tmpDir, "core")
 
-	// Create a dir with compose
 	if err := os.MkdirAll(filepath.Join(coreDir, "traefik"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +392,6 @@ func TestComponentDirs_SkipsNonCompose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a dir without compose
 	if err := os.MkdirAll(filepath.Join(coreDir, "readme-only"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +399,6 @@ func TestComponentDirs_SkipsNonCompose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a file (not a dir)
 	if err := os.WriteFile(filepath.Join(coreDir, ".gitkeep"), []byte(""), 0644); err != nil {
 		t.Fatal(err)
 	}

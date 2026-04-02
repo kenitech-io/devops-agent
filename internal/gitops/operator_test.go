@@ -3,23 +3,13 @@ package gitops
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func mustNewTestRepo(t *testing.T, url, token, path string) *Repo {
-	t.Helper()
-	r, err := NewRepo(url, token, path)
-	if err != nil {
-		t.Fatalf("NewRepo failed: %v", err)
-	}
-	return r
-}
-
 func TestNewOperator(t *testing.T) {
-	repo := mustNewTestRepo(t, "https://github.com/org/repo", "token", "/tmp/test")
+	repo := mustNewRepo(t, "https://github.com/org/repo", "token", "/tmp/test")
 	op := NewOperator(repo, "CORE")
 
 	if op.role != "CORE" {
@@ -34,7 +24,7 @@ func TestNewOperator(t *testing.T) {
 }
 
 func TestOperatorStatus_Initial(t *testing.T) {
-	repo := mustNewTestRepo(t, "https://github.com/org/repo", "", "/tmp/test")
+	repo := mustNewRepo(t, "https://github.com/org/repo", "", "/tmp/test")
 	op := NewOperator(repo, "CORE")
 
 	status := op.Status()
@@ -60,7 +50,7 @@ func TestOperatorStatus_Initial(t *testing.T) {
 }
 
 func TestOperatorStatus_WithData(t *testing.T) {
-	repo := mustNewTestRepo(t, "https://github.com/org/repo", "", "/tmp/test")
+	repo := mustNewRepo(t, "https://github.com/org/repo", "", "/tmp/test")
 	op := NewOperator(repo, "PROD")
 
 	op.mu.Lock()
@@ -107,7 +97,7 @@ func TestOperatorStatus_WithData(t *testing.T) {
 }
 
 func TestSetStatus(t *testing.T) {
-	repo := mustNewTestRepo(t, "https://github.com/org/repo", "", "/tmp/test")
+	repo := mustNewRepo(t, "https://github.com/org/repo", "", "/tmp/test")
 	op := NewOperator(repo, "CORE")
 
 	op.setStatus("syncing", "")
@@ -127,7 +117,7 @@ func TestSetStatus(t *testing.T) {
 }
 
 func TestOperator_Run_CloneFailure(t *testing.T) {
-	repo := mustNewTestRepo(t, "/nonexistent/bare/repo", "", filepath.Join(t.TempDir(), "clone"))
+	repo := mustNewRepo(t, "/nonexistent/bare/repo", "", filepath.Join(t.TempDir(), "clone"))
 	op := NewOperator(repo, "CORE")
 
 	err := op.Run(context.Background())
@@ -142,30 +132,12 @@ func TestOperator_Run_CloneFailure(t *testing.T) {
 }
 
 func TestOperator_Run_ContextCancellation(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-
-	// Create a bare remote with initial commit
-	remoteDir := t.TempDir()
-	run(t, remoteDir, "git", "init", "--bare")
-	workDir := t.TempDir()
-	run(t, workDir, "git", "clone", remoteDir, ".")
-	run(t, workDir, "git", "config", "user.email", "test@test.com")
-	run(t, workDir, "git", "config", "user.name", "Test")
-	coreDir := filepath.Join(workDir, "core")
-	if err := os.MkdirAll(coreDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(coreDir, ".gitkeep"), []byte(""), 0644); err != nil {
-		t.Fatal(err)
-	}
-	run(t, workDir, "git", "add", "-A")
-	run(t, workDir, "git", "commit", "-m", "init")
-	run(t, workDir, "git", "push", "origin", "main")
+	remoteDir, _ := setupTestRepo(t, map[string]string{
+		"core/.gitkeep": "",
+	})
 
 	cloneDir := filepath.Join(t.TempDir(), "clone")
-	repo := mustNewTestRepo(t, remoteDir, "", cloneDir)
+	repo := mustNewRepo(t, remoteDir, "", cloneDir)
 	op := NewOperator(repo, "CORE")
 	op.pollInterval = 10 * time.Millisecond
 
@@ -193,7 +165,7 @@ func TestOperator_Run_ContextCancellation(t *testing.T) {
 
 func TestOperator_applyAll_InvalidRole(t *testing.T) {
 	tmpDir := t.TempDir()
-	repo := mustNewTestRepo(t, "https://github.com/org/repo", "", tmpDir)
+	repo := mustNewRepo(t, "https://github.com/org/repo", "", tmpDir)
 	op := NewOperator(repo, "INVALID")
 
 	err := op.applyAll(context.Background())
@@ -213,7 +185,7 @@ func TestOperator_applyAll_EmptyRoleDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repo := mustNewTestRepo(t, "https://github.com/org/repo", "", tmpDir)
+	repo := mustNewRepo(t, "https://github.com/org/repo", "", tmpDir)
 	op := NewOperator(repo, "CORE")
 
 	err := op.applyAll(context.Background())
@@ -230,7 +202,6 @@ func TestOperator_applyAll_EmptyRoleDir(t *testing.T) {
 func TestOperator_applyAll_ComponentFailures(t *testing.T) {
 	tmpDir := t.TempDir()
 	coreDir := filepath.Join(tmpDir, "core")
-	// Create two components that will fail (no docker)
 	for _, name := range []string{"traefik", "monitoring"} {
 		dir := filepath.Join(coreDir, name)
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -241,7 +212,7 @@ func TestOperator_applyAll_ComponentFailures(t *testing.T) {
 		}
 	}
 
-	repo := mustNewTestRepo(t, "https://github.com/org/repo", "", tmpDir)
+	repo := mustNewRepo(t, "https://github.com/org/repo", "", tmpDir)
 	op := NewOperator(repo, "CORE")
 
 	err := op.applyAll(context.Background())
@@ -262,29 +233,12 @@ func TestOperator_applyAll_ComponentFailures(t *testing.T) {
 }
 
 func TestOperator_pollAndApply_PullError(t *testing.T) {
-	// Clone a repo, then make the remote unreachable
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-
-	remoteDir := t.TempDir()
-	run(t, remoteDir, "git", "init", "--bare")
-	workDir := t.TempDir()
-	run(t, workDir, "git", "clone", remoteDir, ".")
-	run(t, workDir, "git", "config", "user.email", "test@test.com")
-	run(t, workDir, "git", "config", "user.name", "Test")
-	if err := os.MkdirAll(filepath.Join(workDir, "core"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(workDir, "core", ".gitkeep"), []byte(""), 0644); err != nil {
-		t.Fatal(err)
-	}
-	run(t, workDir, "git", "add", "-A")
-	run(t, workDir, "git", "commit", "-m", "init")
-	run(t, workDir, "git", "push", "origin", "main")
+	remoteDir, _ := setupTestRepo(t, map[string]string{
+		"core/.gitkeep": "",
+	})
 
 	cloneDir := filepath.Join(t.TempDir(), "clone")
-	repo := mustNewTestRepo(t, remoteDir, "", cloneDir)
+	repo := mustNewRepo(t, remoteDir, "", cloneDir)
 	if err := repo.Clone(); err != nil {
 		t.Fatal(err)
 	}
@@ -300,5 +254,3 @@ func TestOperator_pollAndApply_PullError(t *testing.T) {
 		t.Errorf("expected error from pull failure, got %s", status.SyncStatus)
 	}
 }
-
-// run helper is defined in repo_test.go
