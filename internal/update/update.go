@@ -303,6 +303,12 @@ func verifyChecksum(filePath, expectedChecksum string) error {
 }
 
 func replaceBinary(srcPath, destPath string) error {
+	// Before replacing the binary, verify the target is not a symlink
+	targetInfo, err := os.Lstat(destPath)
+	if err == nil && targetInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to replace symlink at %s", destPath)
+	}
+
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return err
@@ -339,6 +345,12 @@ func replaceBinary(srcPath, destPath string) error {
 }
 
 func backupBinary(srcPath, destPath string) error {
+	// Before backing up, verify the source is not a symlink
+	srcInfo, err := os.Lstat(srcPath)
+	if err == nil && srcInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to backup symlink at %s", srcPath)
+	}
+
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return err
@@ -365,6 +377,11 @@ func backupBinary(srcPath, destPath string) error {
 }
 
 func rollback(prevPath, currentPath string) error {
+	// Verify neither path is a symlink before rollback
+	if info, err := os.Lstat(currentPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing rollback: target %s is a symlink", currentPath)
+	}
+
 	slog.Warn("rolling back to previous binary", "from", prevPath, "to", currentPath)
 	if err := os.Rename(prevPath, currentPath); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", prevPath, currentPath, err)

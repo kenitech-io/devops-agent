@@ -379,6 +379,9 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 	}
 }
 
+// maxParamLength is the maximum allowed length for string parameters.
+const maxParamLength = 1024
+
 func extractStringParam(params json.RawMessage, key string) (string, error) {
 	if params == nil {
 		return "", fmt.Errorf("missing params")
@@ -394,6 +397,9 @@ func extractStringParam(params json.RawMessage, key string) (string, error) {
 	var val string
 	if err := json.Unmarshal(raw, &val); err != nil {
 		return "", fmt.Errorf("param %q must be a string", key)
+	}
+	if len(val) > maxParamLength {
+		return "", fmt.Errorf("parameter %q exceeds maximum length of %d", key, maxParamLength)
 	}
 	return val, nil
 }

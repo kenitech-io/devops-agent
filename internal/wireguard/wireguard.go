@@ -2,8 +2,10 @@ package wireguard
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"text/template"
 )
@@ -48,8 +50,27 @@ func GenerateKeyPair() (privateKey, publicKey string, err error) {
 	return privKey, pubKey, nil
 }
 
+// validateEndpoint checks that the endpoint is a valid host:port format.
+func validateEndpoint(endpoint string) error {
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid endpoint format: %w", err)
+	}
+	if host == "" || port == "" {
+		return fmt.Errorf("endpoint must have both host and port")
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return fmt.Errorf("invalid port: %w", err)
+	}
+	return nil
+}
+
 // ConfigureInterface writes the wg0 configuration and brings up the interface.
 func ConfigureInterface(cfg Config) error {
+	if err := validateEndpoint(cfg.DashboardEndpoint); err != nil {
+		return fmt.Errorf("invalid dashboard endpoint: %w", err)
+	}
+
 	if err := writeConfig(cfg); err != nil {
 		return err
 	}

@@ -18,6 +18,12 @@ type MessageHandler func(msg *Message)
 // ConnectionCallback is called when the WebSocket connection state changes.
 type ConnectionCallback func(connected bool)
 
+// Rate limiting constants for incoming commands.
+const (
+	maxCommandsPerMinute = 60
+	rateLimitWindow      = time.Minute
+)
+
 // Client manages the WebSocket connection to the dashboard.
 type Client struct {
 	wsEndpoint string
@@ -30,6 +36,10 @@ type Client struct {
 	connMu sync.Mutex
 
 	sendCh chan []byte
+
+	// Rate limiter for incoming messages.
+	rateMu         sync.Mutex
+	rateTimestamps []time.Time
 
 	// Buffered messages for reconnect. When the send channel is full and the
 	// message is a heartbeat or status_report, we store it here so it can be
@@ -184,6 +194,32 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	return firstErr
 }
 
+// checkRateLimit returns true if the message should be allowed, false if rate limited.
+func (c *Client) checkRateLimit() bool {
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-rateLimitWindow)
+
+	// Remove timestamps outside the window.
+	valid := 0
+	for _, ts := range c.rateTimestamps {
+		if ts.After(cutoff) {
+			c.rateTimestamps[valid] = ts
+			valid++
+		}
+	}
+	c.rateTimestamps = c.rateTimestamps[:valid]
+
+	if len(c.rateTimestamps) >= maxCommandsPerMinute {
+		return false
+	}
+
+	c.rateTimestamps = append(c.rateTimestamps, now)
+	return true
+}
+
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	for {
 		if ctx.Err() != nil {
@@ -199,6 +235,14 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 		if err := json.Unmarshal(data, &msg); err != nil {
 			slog.Warn("invalid message from dashboard", "error", err)
 			continue
+		}
+
+		// Rate limit incoming command messages.
+		if msg.Type == TypeCommandRequest {
+			if !c.checkRateLimit() {
+				slog.Warn("rate limit exceeded, dropping command", "type", msg.Type)
+				continue
+			}
 		}
 
 		c.handler(&msg)
