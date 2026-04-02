@@ -22,6 +22,7 @@ type Request struct {
 	Arch          string `json:"arch"`
 	DockerVersion string `json:"dockerVersion"`
 	KernelVersion string `json:"kernelVersion"`
+	Role          string `json:"role,omitempty"` // CORE, PROD, STG, DEV
 }
 
 // Response is the body returned from POST /api/agent/register.

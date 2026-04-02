@@ -15,6 +15,7 @@ import (
 	"github.com/kenitech-io/devops-agent/internal/collector"
 	"github.com/kenitech-io/devops-agent/internal/commands"
 	"github.com/kenitech-io/devops-agent/internal/config"
+	"github.com/kenitech-io/devops-agent/internal/gitops"
 	"github.com/kenitech-io/devops-agent/internal/logging"
 	"github.com/kenitech-io/devops-agent/internal/metrics"
 	"github.com/kenitech-io/devops-agent/internal/register"
@@ -130,6 +131,27 @@ func runAgent(ctx context.Context, cfg *config.Config) {
 	var cmdMu sync.Mutex
 	var cmdWg sync.WaitGroup
 
+	// Start GitOps operator if configured.
+	var gitopsOp *gitops.Operator
+	repoURL := cfg.GetRepoURL()
+	serverRole := cfg.GetServerRole()
+	if repoURL != "" && serverRole != "" {
+		repo, err := gitops.NewRepo(repoURL, cfg.GetDeployToken(), config.GitOpsDataDir)
+		if err != nil {
+			slog.Error("invalid gitops repo config", "error", err)
+		} else {
+			gitopsOp = gitops.NewOperator(repo, serverRole)
+			go func() {
+				if err := gitopsOp.Run(ctx); err != nil && ctx.Err() == nil {
+					slog.Error("gitops operator exited", "error", err)
+				}
+			}()
+			slog.Info("gitops operator started", "repo", repoURL, "role", serverRole)
+		}
+	} else {
+		slog.Info("gitops operator disabled (no repo URL or server role configured)")
+	}
+
 	var client *ws.Client
 	handler := func(msg *ws.Message) {
 		handleDashboardMessage(ctx, client, cfg, msg, &cmdMu, &cmdWg)
@@ -164,13 +186,13 @@ func runAgent(ctx context.Context, cfg *config.Config) {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		time.Sleep(5 * time.Second)
-		sendStatusReport(client)
+		sendStatusReport(client, gitopsOp)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				sendStatusReport(client)
+				sendStatusReport(client, gitopsOp)
 			}
 		}
 	}()
@@ -215,8 +237,12 @@ func sendHeartbeat(client *ws.Client) {
 	}
 }
 
-func sendStatusReport(client *ws.Client) {
+func sendStatusReport(client *ws.Client, gitopsOp *gitops.Operator) {
 	report := collector.CollectStatusReport()
+
+	if gitopsOp != nil {
+		report.GitOps = gitopsOp.Status()
+	}
 
 	msg, err := ws.NewMessage(ws.TypeStatusReport, report)
 	if err != nil {
@@ -444,6 +470,9 @@ func cleanupToken() {
 		if strings.HasPrefix(line, "KENI_AGENT_TOKEN=") {
 			continue
 		}
+		if strings.HasPrefix(line, "KENI_DEPLOY_TOKEN=") {
+			continue
+		}
 		kept = append(kept, line)
 	}
 
@@ -492,6 +521,7 @@ func runRegistration() (*config.Config, error) {
 		Arch:          info.Arch,
 		DockerVersion: info.DockerVersion,
 		KernelVersion: info.KernelVersion,
+		Role:          os.Getenv("KENI_SERVER_ROLE"),
 	}
 
 	var resp *register.Response
@@ -551,6 +581,9 @@ func runRegistration() (*config.Config, error) {
 		WireGuardPubKey:   pubKey,
 		DashboardPubKey:   resp.DashboardPublicKey,
 		DashboardURL:      dashboardURL,
+		ServerRole:        os.Getenv("KENI_SERVER_ROLE"),
+		RepoURL:           os.Getenv("KENI_IDP_REPO_URL"),
+		DeployToken:       os.Getenv("KENI_DEPLOY_TOKEN"),
 	}
 	if err := cfg.Save(); err != nil {
 		return nil, fmt.Errorf("saving config: %w", err)

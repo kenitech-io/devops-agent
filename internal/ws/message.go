@@ -78,11 +78,33 @@ type WireGuardInfo struct {
 	TransferTx      int64  `json:"transferTx"`
 }
 
+// GitOpsComponentStatus describes the state of one IDP component.
+type GitOpsComponentStatus struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Status    string `json:"status"` // "running", "stopped", "error", "pending"
+	Error     string `json:"error,omitempty"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
+}
+
+// GitOpsStatus describes the GitOps operator state.
+type GitOpsStatus struct {
+	Enabled    bool                    `json:"enabled"`
+	RepoURL    string                  `json:"repoUrl,omitempty"`
+	CommitHash string                  `json:"commitHash,omitempty"`
+	Branch     string                  `json:"branch,omitempty"`
+	LastSync   string                  `json:"lastSync,omitempty"`
+	SyncStatus string                  `json:"syncStatus"` // "synced", "syncing", "error", "pending"
+	Error      string                  `json:"error,omitempty"`
+	Components []GitOpsComponentStatus `json:"components,omitempty"`
+}
+
 // StatusReportPayload is the full status snapshot sent every 60 seconds.
 type StatusReportPayload struct {
 	Containers []ContainerInfo `json:"containers"`
 	Backups    BackupInfo      `json:"backups"`
 	WireGuard  WireGuardInfo   `json:"wireguard"`
+	GitOps     *GitOpsStatus   `json:"gitops,omitempty"`
 }
 
 // CommandRequestPayload is received from the dashboard.

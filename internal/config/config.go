@@ -36,6 +36,9 @@ type Config struct {
 	WireGuardPubKey   string `yaml:"wireguard_public_key"`
 	DashboardPubKey   string `yaml:"dashboard_public_key"`
 	DashboardURL      string `yaml:"dashboard_url"`
+	ServerRole        string `yaml:"server_role,omitempty"`
+	RepoURL           string `yaml:"repo_url,omitempty"`
+	DeployToken       string `yaml:"deploy_token,omitempty"`
 }
 
 // saveFunc is the function used to persist config. Override in tests.
@@ -136,6 +139,33 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config missing required fields: %s", strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// GitOpsDataDir is where the agent clones the IDP repo.
+const GitOpsDataDir = "/var/lib/keni-agent/idp"
+
+// GetServerRole returns the server role from config or env var fallback.
+func (c *Config) GetServerRole() string {
+	if c.ServerRole != "" {
+		return c.ServerRole
+	}
+	return os.Getenv("KENI_SERVER_ROLE")
+}
+
+// GetRepoURL returns the IDP repo URL from config or env var fallback.
+func (c *Config) GetRepoURL() string {
+	if c.RepoURL != "" {
+		return c.RepoURL
+	}
+	return os.Getenv("KENI_IDP_REPO_URL")
+}
+
+// GetDeployToken returns the deploy token from config or env var fallback.
+func (c *Config) GetDeployToken() string {
+	if c.DeployToken != "" {
+		return c.DeployToken
+	}
+	return os.Getenv("KENI_DEPLOY_TOKEN")
 }
 
 // ApplyPartialUpdate applies non-empty fields from a remote config update.
