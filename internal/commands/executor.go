@@ -27,6 +27,14 @@ func (e errScheduledAction) Error() string {
 	return string(e)
 }
 
+// errDeployPeriphery is a sentinel error that carries deploy params for
+// multi-step deployment handled in Execute.
+type errDeployPeriphery json.RawMessage
+
+func (e errDeployPeriphery) Error() string {
+	return "deploy_periphery: handled specially"
+}
+
 // Result holds the output of a non-streaming command.
 type Result struct {
 	ExitCode   int
@@ -70,6 +78,9 @@ func Execute(ctx context.Context, action string, params json.RawMessage) (*Resul
 			Stdout:     string(scheduled),
 			DurationMs: time.Since(start).Milliseconds(),
 		}, nil
+	}
+	if deployParams, ok := err.(errDeployPeriphery); ok {
+		return ExecuteDeployPeriphery(ctx, json.RawMessage(deployParams))
 	}
 	if err != nil {
 		return nil, err
@@ -352,6 +363,16 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 			exec.Command("systemctl", "stop", "keni-agent").Run()
 		}()
 		return nil, errScheduledAction("agent shutdown scheduled in 2 seconds, service will be disabled")
+
+	case "deploy_periphery":
+		confirm, err := extractStringParam(params, "confirm")
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		if confirm != "yes" {
+			return nil, fmt.Errorf("INVALID_PARAMS: confirm parameter must be \"yes\"")
+		}
+		return nil, errDeployPeriphery(params)
 
 	default:
 		return nil, fmt.Errorf("UNKNOWN_ACTION: action %q is not in the whitelist", action)
