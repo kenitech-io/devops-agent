@@ -25,7 +25,7 @@ checksum:
 
 release:
   github:
-    owner: kenitech-io
+    owner: kenidevops
     name: devops-agent
   draft: false
   prerelease: auto
