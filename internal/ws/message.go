@@ -49,15 +49,16 @@ type HeartbeatPayload struct {
 
 // ContainerInfo describes a running container.
 type ContainerInfo struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	Image         string  `json:"image"`
-	State         string  `json:"state"`
-	Health        string  `json:"health"`
-	CPUPercent    float64 `json:"cpuPercent"`
-	MemoryUsageMb float64 `json:"memoryUsageMb"`
-	MemoryLimitMb float64 `json:"memoryLimitMb"`
-	Uptime        int64   `json:"uptime"`
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Image         string            `json:"image"`
+	State         string            `json:"state"`
+	Health        string            `json:"health"`
+	CPUPercent    float64           `json:"cpuPercent"`
+	MemoryUsageMb float64           `json:"memoryUsageMb"`
+	MemoryLimitMb float64           `json:"memoryLimitMb"`
+	Uptime        int64             `json:"uptime"`
+	Labels        map[string]string `json:"labels,omitempty"`
 }
 
 // BackupInfo describes backup status.

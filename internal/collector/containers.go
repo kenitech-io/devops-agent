@@ -71,10 +71,43 @@ func CollectContainers() ([]ws.ContainerInfo, error) {
 			info.MemoryUsageMb, info.MemoryLimitMb = parseMemUsage(stats.MemUsage)
 		}
 
+		// Collect Traefik labels for URL auto-discovery
+		info.Labels = collectTraefikLabels(ps.ID)
+
 		containers = append(containers, info)
 	}
 
 	return containers, nil
+}
+
+// collectTraefikLabels extracts Traefik routing labels from a container.
+// Only returns labels starting with "traefik.http.routers." to keep payload small.
+func collectTraefikLabels(containerID string) map[string]string {
+	out, err := exec.Command("docker", "inspect", "--format", "{{json .Config.Labels}}", containerID).Output()
+	if err != nil {
+		return nil
+	}
+
+	var allLabels map[string]string
+	if err := json.Unmarshal(out, &allLabels); err != nil {
+		return nil
+	}
+
+	// Filter to only Traefik routing labels
+	result := make(map[string]string)
+	for k, v := range allLabels {
+		if strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".rule") {
+			result[k] = v
+		}
+		if k == "traefik.enable" {
+			result[k] = v
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func collectStats() map[string]dockerStatsEntry {
