@@ -154,7 +154,7 @@ func runAgent(ctx context.Context, cfg *config.Config) {
 
 	var client *ws.Client
 	handler := func(msg *ws.Message) {
-		handleDashboardMessage(ctx, client, cfg, msg, &cmdMu, &cmdWg)
+		handleDashboardMessage(ctx, client, cfg, msg, &cmdMu, &cmdWg, gitopsOp)
 	}
 	client = ws.NewClient(cfg.WSEndpoint, cfg.AgentID, cfg.WSToken, handler)
 	client.SetConnectionCallback(func(connected bool) {
@@ -314,7 +314,7 @@ func handleConfigUpdate(cfg *config.Config, msg *ws.Message) {
 	}
 }
 
-func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.Config, msg *ws.Message, cmdMu *sync.Mutex, cmdWg *sync.WaitGroup) {
+func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.Config, msg *ws.Message, cmdMu *sync.Mutex, cmdWg *sync.WaitGroup, gitopsOp *gitops.Operator) {
 	switch msg.Type {
 	case ws.TypePing:
 		handlePing(client, msg)
@@ -322,7 +322,7 @@ func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.
 		cmdWg.Add(1)
 		go func() {
 			defer cmdWg.Done()
-			handleCommandRequest(ctx, client, msg, cmdMu)
+			handleCommandRequest(ctx, client, msg, cmdMu, gitopsOp)
 		}()
 	case ws.TypeConfigUpdate:
 		handleConfigUpdate(cfg, msg)
@@ -344,7 +344,7 @@ func handlePing(client *ws.Client, msg *ws.Message) {
 	}
 }
 
-func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Message, cmdMu *sync.Mutex) {
+func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Message, cmdMu *sync.Mutex, gitopsOp *gitops.Operator) {
 	var req ws.CommandRequestPayload
 	if err := json.Unmarshal(msg.Payload, &req); err != nil {
 		sendError(client, "INVALID_PARAMS", "invalid command request payload", msg.ID)
@@ -352,6 +352,23 @@ func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Messag
 	}
 
 	slog.Info("executing command", "action", req.Action, "request_id", msg.ID)
+
+	// gitops_sync is handled specially: triggers the operator directly, no mutex needed
+	if req.Action == "gitops_sync" {
+		if gitopsOp == nil {
+			sendError(client, "EXECUTION_FAILED", "gitops operator not running", msg.ID)
+			return
+		}
+		gitopsOp.TriggerSync()
+		resultMsg, _ := ws.NewMessage(ws.TypeCommandResult, ws.CommandResultPayload{
+			RequestID:  msg.ID,
+			ExitCode:   0,
+			Stdout:     "sync triggered",
+			DurationMs: 0,
+		})
+		client.Send(resultMsg)
+		return
+	}
 
 	if !cmdMu.TryLock() {
 		slog.Warn("agent busy, rejecting command", "action", req.Action)

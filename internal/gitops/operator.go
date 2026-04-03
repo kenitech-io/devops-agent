@@ -18,6 +18,7 @@ type Operator struct {
 	repo         *Repo
 	role         string
 	pollInterval time.Duration
+	triggerCh    chan struct{}
 
 	mu           sync.RWMutex
 	commitHash   string
@@ -34,6 +35,17 @@ func NewOperator(repo *Repo, role string) *Operator {
 		role:         role,
 		pollInterval: DefaultPollInterval,
 		syncStatus:   "pending",
+		triggerCh:    make(chan struct{}, 1),
+	}
+}
+
+// TriggerSync requests an immediate sync cycle. Non-blocking.
+func (o *Operator) TriggerSync() {
+	select {
+	case o.triggerCh <- struct{}{}:
+		slog.Info("immediate sync triggered")
+	default:
+		slog.Info("sync already pending, skipping trigger")
 	}
 }
 
@@ -77,14 +89,22 @@ func (o *Operator) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			o.pollAndApply(ctx)
+		case <-o.triggerCh:
+			slog.Info("running triggered sync")
+			o.pollAndApply(ctx)
 		}
 	}
 }
 
 // pollAndApply checks for repo changes and applies if updated.
+// Detects orphaned components (removed from Git) and stops them.
 func (o *Operator) pollAndApply(ctx context.Context) {
 	o.setStatus("syncing", "")
 
+	// Phase 1: Record component names before pull
+	oldNames := o.repo.ComponentDirNames(o.role)
+
+	// Phase 2: Pull
 	updated, err := o.repo.Pull()
 	if err != nil {
 		o.setStatus("error", fmt.Sprintf("pull failed: %s", err))
@@ -101,6 +121,24 @@ func (o *Operator) pollAndApply(ctx context.Context) {
 		o.mu.Unlock()
 	}
 
+	// Phase 3: Record component names after pull
+	newNames := o.repo.ComponentDirNames(o.role)
+	newSet := make(map[string]bool, len(newNames))
+	for _, n := range newNames {
+		newSet[n] = true
+	}
+
+	// Phase 4: Stop orphaned components (in old but not in new)
+	for _, name := range oldNames {
+		if !newSet[name] {
+			slog.Info("component removed from repo, stopping", "name", name, "role", o.role)
+			if err := StopComponentByProject(ctx, name); err != nil {
+				slog.Error("failed to stop orphaned component", "name", name, "error", err)
+			}
+		}
+	}
+
+	// Phase 5: Apply current components if repo changed
 	if updated {
 		slog.Info("repo changed, applying", "commit", hash[:8])
 		if err := o.applyAll(ctx); err != nil {

@@ -3,6 +3,8 @@ package commands
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 )
 
 var errSystemInfoSpecial = errors.New("system_info: handled specially")
+var errImageCheckSpecial = errors.New("image_check: handled specially")
 
 // errScheduledAction is a sentinel error type returned when a command schedules
 // a background action (e.g. restart, uninstall) and returns a message instead
@@ -63,6 +66,7 @@ var AllowedServices = []string{
 }
 
 var containerNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]+$`)
+var compNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`)
 
 // Execute runs a whitelisted action and returns the result.
 func Execute(ctx context.Context, action string, params json.RawMessage) (*Result, error) {
@@ -78,6 +82,10 @@ func Execute(ctx context.Context, action string, params json.RawMessage) (*Resul
 			Stdout:     string(scheduled),
 			DurationMs: time.Since(start).Milliseconds(),
 		}, nil
+	}
+	if errors.Is(err, errImageCheckSpecial) {
+		name, _ := extractStringParam(params, "name")
+		return executeImageCheck(ctx, name, start)
 	}
 	if deployParams, ok := err.(errDeployPeriphery); ok {
 		return ExecuteDeployPeriphery(ctx, json.RawMessage(deployParams))
@@ -178,6 +186,101 @@ func parseLoadAvg() []float64 {
 	return result
 }
 
+// ImageCheckResult reports whether services in a compose project have newer images.
+type ImageCheckResult struct {
+	Project  string            `json:"project"`
+	Services []ImageCheckEntry `json:"services"`
+}
+
+type ImageCheckEntry struct {
+	Service         string `json:"service"`
+	Image           string `json:"image"`
+	LocalDigest     string `json:"localDigest"`
+	RemoteDigest    string `json:"remoteDigest"`
+	UpdateAvailable bool   `json:"updateAvailable"`
+}
+
+func executeImageCheck(ctx context.Context, projectName string, start time.Time) (*Result, error) {
+	// Get images used by the compose project
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "images", "--format", "json")
+	out, err := cmd.Output()
+	if err != nil {
+		return &Result{
+			ExitCode:   1,
+			Stderr:     fmt.Sprintf("failed to list images: %s", err),
+			DurationMs: time.Since(start).Milliseconds(),
+		}, nil
+	}
+
+	// Parse the JSON lines output
+	type composeImage struct {
+		Service    string `json:"Service"`
+		Repository string `json:"Repository"`
+		Tag        string `json:"Tag"`
+		ID         string `json:"ID"`
+	}
+
+	var images []composeImage
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var img composeImage
+		if err := json.Unmarshal([]byte(line), &img); err != nil {
+			continue
+		}
+		images = append(images, img)
+	}
+
+	result := ImageCheckResult{
+		Project: projectName,
+	}
+
+	for _, img := range images {
+		ref := img.Repository
+		if img.Tag != "" {
+			ref += ":" + img.Tag
+		}
+
+		entry := ImageCheckEntry{
+			Service: img.Service,
+			Image:   ref,
+		}
+
+		// Get local image digest
+		localCmd := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", ref)
+		localOut, err := localCmd.Output()
+		if err == nil {
+			entry.LocalDigest = strings.TrimSpace(string(localOut))
+		}
+
+		// Pull latest manifest to check for updates (pull-only metadata, not the full image)
+		pullCmd := exec.CommandContext(ctx, "docker", "manifest", "inspect", ref)
+		pullOut, err := pullCmd.Output()
+		if err == nil {
+			// Compute digest of the manifest
+			h := sha256.New()
+			h.Write(pullOut)
+			entry.RemoteDigest = "sha256:" + hex.EncodeToString(h.Sum(nil))
+			entry.UpdateAvailable = entry.LocalDigest != "" && entry.RemoteDigest != "" && entry.LocalDigest != entry.RemoteDigest
+		}
+
+		result.Services = append(result.Services, entry)
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling image check result: %w", err)
+	}
+
+	return &Result{
+		ExitCode:   0,
+		Stdout:     string(data),
+		DurationMs: time.Since(start).Milliseconds(),
+	}, nil
+}
+
 // ExecuteStream runs a streaming action, sending output lines to the callback.
 // Returns the final result when the command completes.
 func ExecuteStream(ctx context.Context, action string, params json.RawMessage, onLine func(StreamLine)) (*StreamResult, error) {
@@ -253,6 +356,19 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 
 	case "container_stats":
 		return exec.CommandContext(ctx, "docker", "stats", "--no-stream", "--format", "json"), nil
+
+	case "compose_list":
+		return exec.CommandContext(ctx, "docker", "compose", "ls", "--all", "--format", "json"), nil
+
+	case "image_check":
+		name, err := extractStringParam(params, "name")
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		if !compNameRe.MatchString(name) {
+			return nil, fmt.Errorf("INVALID_PARAMS: invalid component name %q", name)
+		}
+		return nil, errImageCheckSpecial
 
 	case "container_restart":
 		name, err := extractStringParam(params, "name")
@@ -363,6 +479,16 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 			exec.Command("systemctl", "stop", "keni-agent").Run()
 		}()
 		return nil, errScheduledAction("agent shutdown scheduled in 2 seconds, service will be disabled")
+
+	case "gitops_stop_component":
+		name, err := extractStringParam(params, "name")
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		if !compNameRe.MatchString(name) {
+			return nil, fmt.Errorf("INVALID_PARAMS: invalid component name %q", name)
+		}
+		return exec.CommandContext(ctx, "docker", "compose", "-p", name, "down", "--remove-orphans"), nil
 
 	case "deploy_periphery":
 		confirm, err := extractStringParam(params, "confirm")

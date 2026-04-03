@@ -233,3 +233,30 @@ func (r *Repo) ComponentDirs(role string) ([]string, error) {
 
 	return dirs, nil
 }
+
+// ComponentDirNames returns the names of component directories for a role.
+// Returns an empty slice (not error) if the role directory does not exist.
+func (r *Repo) ComponentDirNames(role string) []string {
+	lower := strings.ToLower(role)
+	if !ValidRoles[lower] {
+		return nil
+	}
+
+	roleDir := filepath.Join(r.localPath, lower)
+	entries, err := os.ReadDir(roleDir)
+	if err != nil {
+		return nil
+	}
+
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		composePath := filepath.Join(roleDir, entry.Name(), "docker-compose.yml")
+		if _, err := os.Stat(composePath); err == nil {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
