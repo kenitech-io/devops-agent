@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -443,13 +444,34 @@ func handleUpdateAvailable(msg *ws.Message) {
 
 	slog.Info("update available", "version", payload.Version)
 
-	// Verify release signature before proceeding
+	// Verify release signature before proceeding.
+	// The signature signs the full checksums.txt content (Checksum field).
+	// After verification, extract the specific file checksum for download verification.
 	if err := signing.VerifyChecksum(payload.Checksum, payload.Signature); err != nil {
 		slog.Error("release signature verification failed, rejecting update", "error", err, "version", payload.Version)
 		return
 	}
 
-	if err := update.Update(payload.DownloadURL, payload.Checksum); err != nil {
+	// Extract the file-specific checksum from the signed checksums content.
+	// The Checksum field may be "sha256:hex" (single file) or the full checksums.txt.
+	fileChecksum := payload.Checksum
+	if !strings.HasPrefix(fileChecksum, "sha256:") {
+		// Full checksums.txt: extract the line matching the download filename
+		filename := filepath.Base(payload.DownloadURL)
+		for _, line := range strings.Split(payload.Checksum, "\n") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 && parts[1] == filename {
+				fileChecksum = "sha256:" + parts[0]
+				break
+			}
+		}
+		if !strings.HasPrefix(fileChecksum, "sha256:") {
+			slog.Error("could not extract checksum for file", "filename", filename)
+			return
+		}
+	}
+
+	if err := update.Update(payload.DownloadURL, fileChecksum); err != nil {
 		slog.Error("self-update failed", "error", err)
 	}
 }
