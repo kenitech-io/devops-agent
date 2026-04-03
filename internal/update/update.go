@@ -1,6 +1,8 @@
 package update
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -249,9 +251,9 @@ func Update(downloadURL, expectedChecksum string) error {
 	return nil
 }
 
-func downloadBinary(url, destPath string) error {
+func downloadBinary(rawURL, destPath string) error {
 	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(url)
+	resp, err := client.Get(rawURL)
 	if err != nil {
 		return err
 	}
@@ -261,6 +263,12 @@ func downloadBinary(url, destPath string) error {
 		return fmt.Errorf("download returned status %d", resp.StatusCode)
 	}
 
+	// If the URL points to a .tar.gz, extract the binary from inside
+	if strings.HasSuffix(rawURL, ".tar.gz") || strings.HasSuffix(rawURL, ".tgz") {
+		return extractBinaryFromTarGz(resp.Body, destPath)
+	}
+
+	// Raw binary download
 	out, err := os.Create(destPath)
 	if err != nil {
 		return err
@@ -272,6 +280,44 @@ func downloadBinary(url, destPath string) error {
 	}
 
 	return out.Chmod(0755)
+}
+
+// extractBinaryFromTarGz reads a tar.gz stream and extracts the first executable file
+// named "keni-agent" (the binary produced by goreleaser).
+func extractBinaryFromTarGz(r io.Reader, destPath string) error {
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("tar reader: %w", err)
+		}
+
+		// Look for the keni-agent binary (skip directories and other files)
+		name := filepath.Base(hdr.Name)
+		if hdr.Typeflag == tar.TypeReg && name == "keni-agent" {
+			out, err := os.Create(destPath)
+			if err != nil {
+				return err
+			}
+			defer out.Close()
+
+			if _, err := io.Copy(out, tr); err != nil {
+				return err
+			}
+			return out.Chmod(0755)
+		}
+	}
+
+	return fmt.Errorf("keni-agent binary not found in archive")
 }
 
 func verifyChecksum(filePath, expectedChecksum string) error {

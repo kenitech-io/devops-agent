@@ -16,12 +16,8 @@ builds:
       - -s -w -X main.version={{.Version}}
 
 archives:
-  - id: tarball
-    format: tar.gz
+  - format: tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-  - id: binary
-    format: binary
-    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"
