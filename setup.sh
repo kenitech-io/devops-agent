@@ -371,20 +371,58 @@ main() {
 
     install_service
 
-    # Start
+    # Start and verify registration
     systemctl start keni-agent
-    sleep 3
+    log "Waiting for agent registration..."
 
-    if systemctl is-active --quiet keni-agent; then
-        log "Agent running and connected"
+    local config_file="/etc/keni-agent/config.yml"
+    local max_wait=30
+    local interval=2
+    local elapsed=0
+    local registered=false
+
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+
+        if [ -f "$config_file" ]; then
+            registered=true
+            break
+        fi
+
+        # Check if the process died and is not restarting
+        if ! systemctl is-active --quiet keni-agent; then
+            log "Agent process is not running after ${elapsed}s"
+            break
+        fi
+    done
+
+    if [ "$registered" = true ]; then
+        # Config appeared, verify agent is still running
+        if systemctl is-active --quiet keni-agent; then
+            local agent_id
+            agent_id=$(grep '^agent_id:' "$config_file" 2>/dev/null | awk '{print $2}')
+            log "Agent registered and running (agent_id: ${agent_id:-unknown})"
+            log ""
+            log "Setup complete. Server is visible in the dashboard."
+            log "Status: systemctl status keni-agent"
+            log "Logs:   journalctl -u keni-agent -f"
+        else
+            log "Agent registered but process is no longer running."
+            log "Recent logs:"
+            journalctl -u keni-agent --no-pager -n 10 2>/dev/null || true
+            error "Agent crashed after registration. Check logs: journalctl -u keni-agent -f"
+        fi
     else
-        log "WARNING: agent may not have started. Check: journalctl -u keni-agent -f"
+        log "Registration failed: config not created within ${max_wait}s."
+        log "Recent logs:"
+        journalctl -u keni-agent --no-pager -n 15 2>/dev/null || true
+        log ""
+        log "Troubleshooting:"
+        log "  Status: systemctl status keni-agent"
+        log "  Logs:   journalctl -u keni-agent -f"
+        exit 1
     fi
-
-    log ""
-    log "Setup complete. Server will appear in the dashboard shortly."
-    log "Status: systemctl status keni-agent"
-    log "Logs:   journalctl -u keni-agent -f"
 }
 
 main
