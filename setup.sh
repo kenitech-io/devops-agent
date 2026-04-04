@@ -335,14 +335,11 @@ main() {
     log "================================================"
 
     # Clean up previous installation if present
-    if systemctl is-active --quiet keni-agent 2>/dev/null; then
-        log "Stopping existing agent..."
-        systemctl stop keni-agent
+    if systemctl is-enabled --quiet keni-agent 2>/dev/null; then
+        log "Stopping and disabling existing agent..."
+        systemctl disable --now keni-agent
     fi
-    if [ -f "${CONFIG_DIR}/config.yml" ]; then
-        log "Removing old registration config (will re-register with new token)"
-        rm -f "${CONFIG_DIR}/config.yml"
-    fi
+    rm -f "${CONFIG_DIR}/config.yml" "${CONFIG_DIR}/env"
 
     # Phase 1: Docker
     if [ "$SKIP_DOCKER" = "false" ]; then
