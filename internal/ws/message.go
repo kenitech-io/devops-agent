@@ -16,6 +16,7 @@ const (
 	TypeCommandStream   = "command_stream"
 	TypeCommandComplete = "command_complete"
 	TypeConfigBackup    = "config_backup"
+	TypeAgentGoodbye    = "agent_goodbye"
 	TypePong            = "pong"
 	TypeError           = "error"
 )
@@ -172,11 +173,17 @@ type ConfigBackupPayload struct {
 	ConfigVersion int    `json:"configVersion"`
 }
 
+// AgentGoodbyePayload is sent before the agent disconnects.
+type AgentGoodbyePayload struct {
+	Reason string `json:"reason"` // "uninstall" or "shutdown"
+}
+
 // ConfigUpdatePayload is received from the dashboard to update agent config.
 type ConfigUpdatePayload struct {
 	WSEndpoint   string `json:"wsEndpoint,omitempty"`
 	WSToken      string `json:"wsToken,omitempty"`
 	DashboardURL string `json:"dashboardUrl,omitempty"`
+	Environment  string `json:"environment,omitempty"`
 	RestartAfter bool   `json:"restartAfter"`
 }
 

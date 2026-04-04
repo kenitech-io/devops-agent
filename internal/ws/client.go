@@ -121,6 +121,26 @@ func (c *Client) Send(msg *Message) error {
 	}
 }
 
+// SendDirect writes a message directly to the WebSocket connection, bypassing
+// the send channel. This is used during shutdown when the write loop may have
+// already exited. Returns an error if no connection is available.
+func (c *Client) SendDirect(msg *Message) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshaling message: %w", err)
+	}
+
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+
+	if conn == nil {
+		return fmt.Errorf("no active connection")
+	}
+
+	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
 func (c *Client) connectAndServe(ctx context.Context) error {
 	url := fmt.Sprintf("%s?agentId=%s", c.wsEndpoint, c.agentID)
 	slog.Info("connecting to dashboard", "url", url)

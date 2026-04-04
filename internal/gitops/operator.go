@@ -4,14 +4,24 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/kenitech-io/devops-agent/internal/secrets"
 	"github.com/kenitech-io/devops-agent/internal/ws"
 )
 
 // DefaultPollInterval is the default interval between git pull checks.
 const DefaultPollInterval = 30 * time.Second
+
+// SecretsConfig holds the parameters needed to fetch secrets from the dashboard.
+type SecretsConfig struct {
+	DashboardURL string
+	AgentID      string
+	WSToken      string
+}
 
 // Operator manages the GitOps lifecycle: clone, poll, apply, report.
 type Operator struct {
@@ -19,6 +29,7 @@ type Operator struct {
 	role         string
 	pollInterval time.Duration
 	triggerCh    chan struct{}
+	secretsCfg   *SecretsConfig
 
 	mu           sync.RWMutex
 	commitHash   string
@@ -37,6 +48,12 @@ func NewOperator(repo *Repo, role string) *Operator {
 		syncStatus:   "pending",
 		triggerCh:    make(chan struct{}, 1),
 	}
+}
+
+// SetSecretsConfig configures the operator to fetch and inject secrets
+// from the dashboard before applying components.
+func (o *Operator) SetSecretsConfig(cfg *SecretsConfig) {
+	o.secretsCfg = cfg
 }
 
 // TriggerSync requests an immediate sync cycle. Non-blocking.
@@ -167,6 +184,9 @@ func (o *Operator) applyAll(ctx context.Context) error {
 		return nil
 	}
 
+	// Inject secrets into .env files before applying
+	o.injectSecrets(dirs)
+
 	slog.Info("applying components", "count", len(dirs), "role", o.role)
 	results := ApplyAll(ctx, dirs)
 
@@ -195,6 +215,47 @@ func (o *Operator) applyAll(ctx context.Context) error {
 		return fmt.Errorf("%d components failed", errCount)
 	}
 	return nil
+}
+
+// injectSecrets fetches secrets from the dashboard and injects them into .env
+// files that contain ${VAR} patterns. Non-fatal: logs errors but does not fail the sync.
+func (o *Operator) injectSecrets(dirs []string) {
+	if o.secretsCfg == nil || o.secretsCfg.DashboardURL == "" || o.secretsCfg.WSToken == "" {
+		return
+	}
+
+	// Check if any dir has an .env file with ${VAR} patterns before fetching
+	hasEnvFiles := false
+	for _, dir := range dirs {
+		envPath := filepath.Join(dir, ".env")
+		if _, err := os.Stat(envPath); err == nil {
+			hasEnvFiles = true
+			break
+		}
+	}
+	if !hasEnvFiles {
+		return
+	}
+
+	fetched, err := secrets.FetchSecrets(o.secretsCfg.DashboardURL, o.secretsCfg.AgentID, o.secretsCfg.WSToken)
+	if err != nil {
+		slog.Error("failed to fetch secrets from dashboard", "error", err)
+		return
+	}
+
+	if len(fetched) == 0 {
+		return
+	}
+
+	for _, dir := range dirs {
+		envPath := filepath.Join(dir, ".env")
+		if _, err := os.Stat(envPath); err != nil {
+			continue
+		}
+		if err := secrets.InjectSecrets(envPath, fetched); err != nil {
+			slog.Error("failed to inject secrets", "dir", dir, "error", err)
+		}
+	}
 }
 
 func (o *Operator) setStatus(status, errMsg string) {

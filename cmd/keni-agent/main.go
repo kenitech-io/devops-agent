@@ -84,12 +84,23 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Handle shutdown signals
+	// Handle shutdown signals. The wsClient pointer is set later by runAgent;
+	// we capture it here so the signal handler can send a goodbye message.
+	var wsClient *ws.Client
+	var wsClientMu sync.Mutex
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		slog.Info("received signal, shutting down", "signal", sig.String())
+		slog.Info("received signal, sending goodbye", "signal", sig.String())
+		wsClientMu.Lock()
+		c := wsClient
+		wsClientMu.Unlock()
+		if c != nil {
+			sendGoodbye(c, "shutdown")
+			time.Sleep(1 * time.Second)
+		}
 		cancel()
 	}()
 
@@ -121,14 +132,14 @@ func main() {
 	// Start WireGuard watchdog
 	wireguard.StartWatchdog(ctx)
 
-	// Start the agent loop
-	runAgent(ctx, cfg)
+	// Start the agent loop. Pass the wsClient pointer so the signal handler can use it.
+	runAgent(ctx, cfg, &wsClient, &wsClientMu)
 
 	slog.Info("keni-agent stopped")
 }
 
 // runAgent connects to the dashboard via WebSocket and runs heartbeat/status/command loops.
-func runAgent(ctx context.Context, cfg *config.Config) {
+func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, wsClientMu *sync.Mutex) {
 	var cmdMu sync.Mutex
 	var cmdWg sync.WaitGroup
 
@@ -142,6 +153,11 @@ func runAgent(ctx context.Context, cfg *config.Config) {
 			slog.Error("invalid gitops repo config", "error", err)
 		} else {
 			gitopsOp = gitops.NewOperator(repo, serverRole)
+			gitopsOp.SetSecretsConfig(&gitops.SecretsConfig{
+				DashboardURL: cfg.DashboardURL,
+				AgentID:      cfg.AgentID,
+				WSToken:      cfg.WSToken,
+			})
 			go func() {
 				if err := gitopsOp.Run(ctx); err != nil && ctx.Err() == nil {
 					slog.Error("gitops operator exited", "error", err)
@@ -158,6 +174,12 @@ func runAgent(ctx context.Context, cfg *config.Config) {
 		handleDashboardMessage(ctx, client, cfg, msg, &cmdMu, &cmdWg, gitopsOp)
 	}
 	client = ws.NewClient(cfg.WSEndpoint, cfg.AgentID, cfg.WSToken, handler)
+
+	// Expose the client to the signal handler for goodbye messages.
+	wsClientMu.Lock()
+	*wsClientPtr = client
+	wsClientMu.Unlock()
+
 	client.SetConnectionCallback(func(connected bool) {
 		metrics.SetWSConnected(connected)
 		if connected {
@@ -258,6 +280,19 @@ func sendStatusReport(client *ws.Client, gitopsOp *gitops.Operator) {
 	}
 }
 
+func sendGoodbye(client *ws.Client, reason string) {
+	msg, err := ws.NewMessage(ws.TypeAgentGoodbye, ws.AgentGoodbyePayload{Reason: reason})
+	if err != nil {
+		slog.Error("creating goodbye message", "error", err)
+		return
+	}
+	if err := client.SendDirect(msg); err != nil {
+		slog.Warn("sending goodbye message", "error", err)
+	} else {
+		slog.Info("sent goodbye message", "reason", reason)
+	}
+}
+
 func sendConfigBackup(client *ws.Client, cfg *config.Config) {
 	payload := ws.ConfigBackupPayload{
 		AgentID:       cfg.AgentID,
@@ -281,7 +316,7 @@ func sendConfigBackup(client *ws.Client, cfg *config.Config) {
 	}
 }
 
-func handleConfigUpdate(cfg *config.Config, msg *ws.Message) {
+func handleConfigUpdate(cfg *config.Config, msg *ws.Message, gitopsOp *gitops.Operator) {
 	var payload ws.ConfigUpdatePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		slog.Error("parsing config_update", "error", err)
@@ -289,6 +324,15 @@ func handleConfigUpdate(cfg *config.Config, msg *ws.Message) {
 	}
 
 	changed := cfg.ApplyPartialUpdate(payload.WSEndpoint, payload.WSToken, payload.DashboardURL)
+
+	// Handle environment change: update server role in config.
+	envChanged := false
+	if payload.Environment != "" && payload.Environment != cfg.ServerRole {
+		cfg.ServerRole = payload.Environment
+		changed = true
+		envChanged = true
+	}
+
 	if !changed {
 		slog.Info("config_update received but no fields changed")
 		return
@@ -303,7 +347,14 @@ func handleConfigUpdate(cfg *config.Config, msg *ws.Message) {
 		"ws_endpoint_changed", payload.WSEndpoint != "",
 		"ws_token_changed", payload.WSToken != "",
 		"dashboard_url_changed", payload.DashboardURL != "",
+		"environment_changed", envChanged,
 	)
+
+	// If environment changed, trigger a gitops sync to apply the new role's components.
+	if envChanged && gitopsOp != nil {
+		slog.Info("environment changed, triggering gitops sync", "new_environment", payload.Environment)
+		gitopsOp.TriggerSync()
+	}
 
 	if payload.RestartAfter {
 		slog.Info("restart requested, scheduling restart in 2s")
@@ -326,7 +377,7 @@ func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.
 			handleCommandRequest(ctx, client, msg, cmdMu, gitopsOp)
 		}()
 	case ws.TypeConfigUpdate:
-		handleConfigUpdate(cfg, msg)
+		handleConfigUpdate(cfg, msg, gitopsOp)
 	case ws.TypeUpdateAvailable:
 		go handleUpdateAvailable(msg)
 	default:
@@ -369,6 +420,12 @@ func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Messag
 		})
 		client.Send(resultMsg)
 		return
+	}
+
+	// Send goodbye before uninstall so the dashboard knows the agent is leaving.
+	if req.Action == "agent_uninstall" {
+		sendGoodbye(client, "uninstall")
+		time.Sleep(2 * time.Second)
 	}
 
 	if !cmdMu.TryLock() {
