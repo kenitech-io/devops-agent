@@ -645,8 +645,9 @@ func runRegistration() (*config.Config, error) {
 		return nil, fmt.Errorf("registering with dashboard after %d attempts: %w", maxAttempts, err)
 	}
 
-	// Skip WireGuard in dev mode (KENI_SKIP_WIREGUARD=true)
-	if os.Getenv("KENI_SKIP_WIREGUARD") != "true" {
+	// Skip WireGuard when: explicitly disabled, dashboard has no WG key, or dev mode
+	skipWG := os.Getenv("KENI_SKIP_WIREGUARD") == "true" || resp.DashboardPublicKey == ""
+	if !skipWG {
 		wgCfg := wireguard.Config{
 			PrivateKey:        privKey,
 			AssignedIP:        resp.AssignedIP,
@@ -657,7 +658,11 @@ func runRegistration() (*config.Config, error) {
 			return nil, fmt.Errorf("configuring WireGuard: %w", err)
 		}
 	} else {
-		slog.Info("skipping WireGuard setup (dev mode)")
+		if resp.DashboardPublicKey == "" {
+			slog.Info("skipping WireGuard setup (dashboard has no WireGuard key configured)")
+		} else {
+			slog.Info("skipping WireGuard setup (KENI_SKIP_WIREGUARD=true)")
+		}
 	}
 
 	// Allow overriding the WebSocket endpoint for dev (e.g., Tailscale IP)
