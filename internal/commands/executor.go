@@ -345,7 +345,11 @@ func ExecuteStream(ctx context.Context, action string, params json.RawMessage, o
 
 // IsStreamingAction returns true if the action should use streaming output.
 func IsStreamingAction(action string) bool {
-	return action == "backup_trigger"
+	switch action {
+	case "backup_trigger", "backup_restore":
+		return true
+	}
+	return false
 }
 
 // buildCommand creates the exec.Cmd for a whitelisted action with validated params.
@@ -381,10 +385,22 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 		return exec.CommandContext(ctx, "docker", "restart", name), nil
 
 	case "backup_snapshots":
-		return exec.CommandContext(ctx, "restic", "snapshots", "--json"), nil
+		return exec.CommandContext(ctx, "docker", "exec", "keni-backup", "restic", "snapshots", "--json"), nil
 
 	case "backup_stats":
-		return exec.CommandContext(ctx, "restic", "stats", "--json"), nil
+		return exec.CommandContext(ctx, "docker", "exec", "keni-backup", "restic", "stats", "--json"), nil
+
+	case "backup_restore":
+		snapshotID, err := extractStringParam(params, "snapshotId")
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		if snapshotID == "" {
+			return nil, fmt.Errorf("INVALID_PARAMS: snapshotId parameter required")
+		}
+		// Run restic restore inside the backup container
+		return exec.CommandContext(ctx, "docker", "exec", "keni-backup",
+			"restic", "restore", snapshotID, "--target", "/restore"), nil
 
 	case "backup_trigger":
 		return exec.CommandContext(ctx, "docker", "start", "-a", "keni-backup"), nil

@@ -27,8 +27,8 @@ func CollectBackups() ws.BackupInfo {
 		LastStatus: "unknown",
 	}
 
-	// Get snapshots
-	snapOut, err := exec.Command("restic", "snapshots", "--json", "--latest", "1").Output()
+	// Get snapshots (restic is only available inside the backup container)
+	snapOut, err := exec.Command("docker", "exec", "keni-backup", "restic", "snapshots", "--json", "--latest", "1").Output()
 	if err != nil {
 		info.LastStatus = "error"
 		return info
@@ -52,7 +52,7 @@ func CollectBackups() ws.BackupInfo {
 	}
 
 	// Get total snapshot count (separate call without --latest)
-	countOut, err := exec.Command("restic", "snapshots", "--json").Output()
+	countOut, err := exec.Command("docker", "exec", "keni-backup", "restic", "snapshots", "--json").Output()
 	if err == nil {
 		var allSnapshots []resticSnapshot
 		if json.Unmarshal(countOut, &allSnapshots) == nil {
@@ -61,7 +61,7 @@ func CollectBackups() ws.BackupInfo {
 	}
 
 	// Get stats
-	statsOut, err := exec.Command("restic", "stats", "--json").Output()
+	statsOut, err := exec.Command("docker", "exec", "keni-backup", "restic", "stats", "--json").Output()
 	if err == nil {
 		var stats resticStats
 		if json.Unmarshal(statsOut, &stats) == nil {
