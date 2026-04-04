@@ -214,10 +214,8 @@ install_wireguard() {
 # Phase 5: Keni Agent
 # ============================================================
 install_agent() {
-    if [ -f "${INSTALL_DIR}/keni-agent" ]; then
-        log "Agent binary already exists, skipping download"
-        return
-    fi
+    # Always download latest binary (handles upgrades on re-install)
+    rm -f "${INSTALL_DIR}/keni-agent"
 
     ARCH=$(detect_arch)
 
@@ -336,11 +334,14 @@ main() {
     log "  Dashboard: ${DASHBOARD_URL}"
     log "================================================"
 
-    # Check if already registered
-    ALREADY_REGISTERED=false
+    # Clean up previous installation if present
+    if systemctl is-active --quiet keni-agent 2>/dev/null; then
+        log "Stopping existing agent..."
+        systemctl stop keni-agent
+    fi
     if [ -f "${CONFIG_DIR}/config.yml" ]; then
-        ALREADY_REGISTERED=true
-        log "Agent already registered. To re-register, remove ${CONFIG_DIR}/config.yml"
+        log "Removing old registration config (will re-register with new token)"
+        rm -f "${CONFIG_DIR}/config.yml"
     fi
 
     # Phase 1: Docker
@@ -361,9 +362,7 @@ main() {
 
     # Phase 5: Agent
     install_agent
-    if [ "$ALREADY_REGISTERED" = "false" ]; then
-        setup_config
-    fi
+    setup_config
     setup_user
 
     # Create GitOps data directory
@@ -373,12 +372,8 @@ main() {
     install_service
 
     # Start
-    if [ "$ALREADY_REGISTERED" = "true" ]; then
-        systemctl restart keni-agent
-    else
-        systemctl start keni-agent
-        sleep 3
-    fi
+    systemctl start keni-agent
+    sleep 3
 
     if systemctl is-active --quiet keni-agent; then
         log "Agent running and connected"
