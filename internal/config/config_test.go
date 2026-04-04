@@ -215,16 +215,27 @@ func TestValidate_InvalidWSEndpoint(t *testing.T) {
 }
 
 func TestValidate_WSEndpointPlainRejectsInProd(t *testing.T) {
-	// Ensure we are NOT in dev mode
+	// ws:// to a public IP should be rejected in production
 	t.Setenv("KENI_SKIP_WIREGUARD", "")
 	cfg := validConfig()
-	cfg.WSEndpoint = "ws://10.99.0.1/ws/agent"
+	cfg.WSEndpoint = "ws://example.com/ws/agent"
 	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("expected error for ws:// in production mode")
+		t.Fatal("expected error for ws:// to public host in production mode")
 	}
 	if !contains(err.Error(), "wss://") {
 		t.Errorf("expected error about wss://, got: %v", err)
+	}
+}
+
+func TestValidate_WSEndpointPlainAllowedOverWireGuard(t *testing.T) {
+	// ws:// to WireGuard tunnel IP is allowed (tunnel is encrypted)
+	t.Setenv("KENI_SKIP_WIREGUARD", "")
+	cfg := validConfig()
+	cfg.WSEndpoint = "ws://10.99.0.1:8080/ws/agent"
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("ws:// over WireGuard tunnel should be allowed, got: %v", err)
 	}
 }
 

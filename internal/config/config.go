@@ -124,8 +124,8 @@ func (c *Config) Validate() error {
 		missing = append(missing, "ws_endpoint")
 	} else if !strings.HasPrefix(c.WSEndpoint, "ws://") && !strings.HasPrefix(c.WSEndpoint, "wss://") {
 		return fmt.Errorf("invalid ws_endpoint: %q must start with ws:// or wss://", c.WSEndpoint)
-	} else if !IsDevMode() && strings.HasPrefix(c.WSEndpoint, "ws://") {
-		return fmt.Errorf("ws_endpoint must use wss:// in production (ws:// only allowed in dev mode with KENI_SKIP_WIREGUARD=true)")
+	} else if !IsDevMode() && strings.HasPrefix(c.WSEndpoint, "ws://") && !strings.Contains(c.WSEndpoint, "10.99.0.") {
+		return fmt.Errorf("ws_endpoint must use wss:// in production (ws:// allowed over WireGuard tunnel or dev mode)")
 	}
 	if c.WSToken == "" {
 		slog.Warn("config: ws_token is empty, agent will need to re-register with the dashboard")
