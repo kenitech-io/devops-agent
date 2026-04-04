@@ -183,8 +183,7 @@ func TestValidate_MissingFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty config")
 	}
-	// wireguard_private_key is only required when DashboardPubKey is set
-	for _, field := range []string{"agent_id", "assigned_ip", "ws_endpoint", "dashboard_url"} {
+	for _, field := range []string{"agent_id", "assigned_ip", "ws_endpoint", "wireguard_private_key", "dashboard_url"} {
 		if !contains(err.Error(), field) {
 			t.Errorf("expected error to mention %q, got: %v", field, err)
 		}

@@ -111,19 +111,14 @@ func (c *Config) Validate() error {
 	} else if net.ParseIP(c.AssignedIP) == nil {
 		return fmt.Errorf("invalid assigned_ip: %q is not a valid IP address", c.AssignedIP)
 	}
-	// DashboardEndpoint and WireGuard keys are only required when WireGuard is configured
-	// (i.e. DashboardPubKey is set). Without WireGuard, agents connect via wss:// through Traefik.
-	wireguardEnabled := c.DashboardPubKey != ""
-	if wireguardEnabled {
-		if c.DashboardEndpoint == "" {
-			missing = append(missing, "dashboard_endpoint")
-		}
-		if c.WireGuardPrivKey == "" {
-			missing = append(missing, "wireguard_private_key")
-		}
-		if c.WireGuardPubKey == "" {
-			missing = append(missing, "wireguard_public_key")
-		}
+	if c.DashboardEndpoint == "" {
+		missing = append(missing, "dashboard_endpoint")
+	}
+	if c.WireGuardPrivKey == "" {
+		missing = append(missing, "wireguard_private_key")
+	}
+	if c.WireGuardPubKey == "" {
+		missing = append(missing, "wireguard_public_key")
 	}
 	if c.WSEndpoint == "" {
 		missing = append(missing, "ws_endpoint")
