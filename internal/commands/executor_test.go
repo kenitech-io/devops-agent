@@ -268,8 +268,8 @@ func TestBuildCommand_ParameterlessActions(t *testing.T) {
 	}{
 		{"container_list", "docker", []string{"docker", "ps", "-a", "--format", "json"}},
 		{"container_stats", "docker", []string{"docker", "stats", "--no-stream", "--format", "json"}},
-		{"backup_snapshots", "restic", []string{"restic", "snapshots", "--json"}},
-		{"backup_stats", "restic", []string{"restic", "stats", "--json"}},
+		{"backup_snapshots", "docker", []string{"docker", "exec", "keni-backup", "restic", "snapshots", "--json"}},
+		{"backup_stats", "docker", []string{"docker", "exec", "keni-backup", "restic", "stats", "--json"}},
 		{"backup_trigger", "docker", []string{"docker", "start", "-a", "keni-backup"}},
 		{"system_disk", "df", []string{"df", "-h"}},
 		{"system_memory", "free", []string{"free", "-m"}},
