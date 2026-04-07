@@ -667,6 +667,20 @@ func runRegistration() (*config.Config, error) {
 		wsEndpoint = override
 	}
 
+	// Use registration response values, fall back to env vars
+	serverRole := resp.ServerRole
+	if serverRole == "" {
+		serverRole = os.Getenv("KENI_SERVER_ROLE")
+	}
+	repoURL := resp.GitRepoURL
+	if repoURL == "" {
+		repoURL = os.Getenv("KENI_IDP_REPO_URL")
+	}
+	resolvedDashboardURL := resp.DashboardURL
+	if resolvedDashboardURL == "" {
+		resolvedDashboardURL = dashboardURL
+	}
+
 	cfg := &config.Config{
 		AgentID:           resp.AgentID,
 		AssignedIP:        resp.AssignedIP,
@@ -676,14 +690,23 @@ func runRegistration() (*config.Config, error) {
 		WireGuardPrivKey:  privKey,
 		WireGuardPubKey:   pubKey,
 		DashboardPubKey:   resp.DashboardPublicKey,
-		DashboardURL:      dashboardURL,
-		ServerRole:        os.Getenv("KENI_SERVER_ROLE"),
-		RepoURL:           os.Getenv("KENI_IDP_REPO_URL"),
-		DeployToken:       os.Getenv("KENI_DEPLOY_TOKEN"),
+		DashboardURL:      resolvedDashboardURL,
+		ServerRole:        serverRole,
+		RepoURL:           repoURL,
+		DeployToken:       firstNonEmpty(resp.DeployToken, os.Getenv("KENI_DEPLOY_TOKEN")),
 	}
 	if err := cfg.Save(); err != nil {
 		return nil, fmt.Errorf("saving config: %w", err)
 	}
 
 	return cfg, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

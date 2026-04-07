@@ -33,6 +33,10 @@ type Response struct {
 	DashboardEndpoint  string `json:"dashboardEndpoint"`
 	WSEndpoint         string `json:"wsEndpoint"`
 	WSToken            string `json:"wsToken"`
+	GitRepoURL         string `json:"gitRepoUrl,omitempty"`
+	DeployToken        string `json:"deployToken,omitempty"`
+	ServerRole         string `json:"serverRole,omitempty"`
+	DashboardURL       string `json:"dashboardUrl,omitempty"`
 }
 
 // ErrorResponse is returned on registration failure.
