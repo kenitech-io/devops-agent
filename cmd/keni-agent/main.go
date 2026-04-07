@@ -407,7 +407,7 @@ func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.
 	case ws.TypeConfigUpdate:
 		handleConfigUpdate(cfg, msg, gitopsOp)
 	case ws.TypeUpdateAvailable:
-		go handleUpdateAvailable(msg)
+		go handleUpdateAvailable(client, msg)
 	default:
 		slog.Warn("unknown message type from dashboard", "type", msg.Type)
 	}
@@ -520,7 +520,7 @@ func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Messag
 	}
 }
 
-func handleUpdateAvailable(msg *ws.Message) {
+func handleUpdateAvailable(client *ws.Client, msg *ws.Message) {
 	var payload ws.UpdateAvailablePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		slog.Error("parsing update_available", "error", err)
@@ -529,19 +529,32 @@ func handleUpdateAvailable(msg *ws.Message) {
 
 	slog.Info("update available", "version", payload.Version)
 
-	// Verify release signature before proceeding.
-	// The signature signs the full checksums.txt content (Checksum field).
-	// After verification, extract the specific file checksum for download verification.
-	if err := signing.VerifyChecksum(payload.Checksum, payload.Signature); err != nil {
-		slog.Error("release signature verification failed, rejecting update", "error", err, "version", payload.Version)
-		return
+	// Send progress events back to the dashboard via WebSocket
+	sendProgress := func(step, status, detail string) {
+		progressMsg, err := ws.NewMessage(ws.TypeUpdateProgress, ws.UpdateProgressPayload{
+			Version: payload.Version,
+			Step:    step,
+			Status:  status,
+			Detail:  detail,
+		})
+		if err == nil {
+			client.Send(progressMsg)
+		}
 	}
 
+	sendProgress("Verifying signature", "running", "")
+
+	// Verify release signature before proceeding.
+	if err := signing.VerifyChecksum(payload.Checksum, payload.Signature); err != nil {
+		slog.Error("release signature verification failed, rejecting update", "error", err, "version", payload.Version)
+		sendProgress("Verifying signature", "error", err.Error())
+		return
+	}
+	sendProgress("Verifying signature", "done", "")
+
 	// Extract the file-specific checksum from the signed checksums content.
-	// The Checksum field may be "sha256:hex" (single file) or the full checksums.txt.
 	fileChecksum := payload.Checksum
 	if !strings.HasPrefix(fileChecksum, "sha256:") {
-		// Full checksums.txt: extract the line matching the download filename
 		filename := filepath.Base(payload.DownloadURL)
 		for _, line := range strings.Split(payload.Checksum, "\n") {
 			parts := strings.Fields(line)
@@ -552,11 +565,12 @@ func handleUpdateAvailable(msg *ws.Message) {
 		}
 		if !strings.HasPrefix(fileChecksum, "sha256:") {
 			slog.Error("could not extract checksum for file", "filename", filename)
+			sendProgress("Extracting checksum", "error", "Could not find checksum for "+filename)
 			return
 		}
 	}
 
-	if err := update.Update(payload.DownloadURL, fileChecksum); err != nil {
+	if err := update.UpdateWithProgress(payload.DownloadURL, fileChecksum, sendProgress); err != nil {
 		slog.Error("self-update failed", "error", err)
 	}
 }

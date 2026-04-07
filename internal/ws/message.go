@@ -17,6 +17,7 @@ const (
 	TypeCommandComplete = "command_complete"
 	TypeConfigBackup    = "config_backup"
 	TypeAgentGoodbye    = "agent_goodbye"
+	TypeUpdateProgress  = "update_progress"
 	TypePong            = "pong"
 	TypeError           = "error"
 )
@@ -145,6 +146,14 @@ type UpdateAvailablePayload struct {
 	DownloadURL string `json:"downloadUrl"`
 	Checksum    string `json:"checksum"`
 	Signature   string `json:"signature"`
+}
+
+// UpdateProgressPayload reports update progress steps to the dashboard.
+type UpdateProgressPayload struct {
+	Version string `json:"version"`
+	Step    string `json:"step"`
+	Status  string `json:"status"` // "running", "done", "error"
+	Detail  string `json:"detail,omitempty"`
 }
 
 // PingPayload is empty.

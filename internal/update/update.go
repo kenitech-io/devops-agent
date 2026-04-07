@@ -148,85 +148,102 @@ func ValidateDownloadURL(rawURL string) error {
 	return fmt.Errorf("download host %q is not in the allowed list", host)
 }
 
+// ProgressFunc is called at each step of the update process.
+type ProgressFunc func(step, status, detail string)
+
 // Update downloads a new agent binary, verifies its checksum, replaces the
 // current binary with rollback support, and restarts via systemd.
 func Update(downloadURL, expectedChecksum string) error {
-	if err := preflightFunc(); err != nil {
-		return err
+	return UpdateWithProgress(downloadURL, expectedChecksum, nil)
+}
+
+// UpdateWithProgress is like Update but calls progress at each step.
+func UpdateWithProgress(downloadURL, expectedChecksum string, progress ProgressFunc) error {
+	report := func(step, status, detail string) {
+		if progress != nil {
+			progress(step, status, detail)
+		}
 	}
 
-	// Validate the download URL before proceeding
+	report("Preflight checks", "running", "")
+	if err := preflightFunc(); err != nil {
+		report("Preflight checks", "error", err.Error())
+		return err
+	}
+	report("Preflight checks", "done", "")
+
 	if err := ValidateDownloadURL(downloadURL); err != nil {
+		report("Validating URL", "error", err.Error())
 		return fmt.Errorf("download URL rejected: %w", err)
 	}
 
 	slog.Info("starting self-update", "url", downloadURL)
 
-	// Get path of current binary first, so download goes to the same partition
 	currentPath, err := executableFunc()
 	if err != nil {
 		return fmt.Errorf("getting current executable path: %w", err)
 	}
 
-	// Download next to the current binary (same filesystem for atomic rename)
+	report("Downloading binary", "running", filepath.Base(downloadURL))
 	tmpPath := currentPath + ".download"
 	if err := downloadBinary(downloadURL, tmpPath); err != nil {
 		os.Remove(tmpPath)
+		report("Downloading binary", "error", err.Error())
 		return fmt.Errorf("downloading binary: %w", err)
 	}
 	defer os.Remove(tmpPath)
+	report("Downloading binary", "done", "")
 
-	// Verify checksum
+	report("Verifying checksum", "running", "")
 	if err := verifyChecksum(tmpPath, expectedChecksum); err != nil {
+		report("Verifying checksum", "error", err.Error())
 		return fmt.Errorf("checksum verification failed: %w", err)
 	}
+	report("Verifying checksum", "done", "")
 
-	// Write marker file to indicate update is in progress.
-	// Startup recovery uses this to detect incomplete updates.
 	markerPath := UpdateMarkerPath
 	if markerOverride := markerPathOverride; markerOverride != "" {
 		markerPath = markerOverride
 	}
 	if err := os.WriteFile(markerPath, []byte(""), 0600); err != nil {
 		slog.Warn("could not write update marker file", "error", err)
-		// Continue anyway; marker is a best-effort safety net.
 	}
 
-	// Back up the current binary for rollback
+	report("Backing up current binary", "running", "")
 	prevPath := currentPath + ".prev"
 	if err := backupBinary(currentPath, prevPath); err != nil {
 		os.Remove(markerPath)
+		report("Backing up current binary", "error", err.Error())
 		return fmt.Errorf("backing up current binary: %w", err)
 	}
-	slog.Info("backed up current binary", "path", prevPath)
+	report("Backing up current binary", "done", "")
 
-	// Replace the binary
+	report("Replacing binary", "running", "")
 	if err := replaceBinary(tmpPath, currentPath); err != nil {
-		// Restore from backup on replace failure
 		restoreErr := os.Rename(prevPath, currentPath)
 		if restoreErr != nil {
 			slog.Error("failed to restore backup after replace failure", "error", restoreErr)
 		}
 		os.Remove(markerPath)
+		report("Replacing binary", "error", err.Error())
 		return fmt.Errorf("replacing binary: %w", err)
 	}
+	report("Replacing binary", "done", "")
 
 	slog.Info("binary replaced, restarting via systemd")
+	report("Restarting service", "running", "")
 
-	// Restart the service
 	if err := restartFunc(); err != nil {
 		slog.Error("restart failed, rolling back", "error", err)
 		if rollbackErr := rollback(prevPath, currentPath); rollbackErr != nil {
 			slog.Error("rollback failed", "error", rollbackErr)
 		}
 		os.Remove(markerPath)
+		report("Restarting service", "error", err.Error())
 		return fmt.Errorf("restarting service: %w", err)
 	}
+	report("Restarting service", "done", "Agent will reconnect with new version")
 
-	// Post-restart health check (runs in a goroutine since systemd will restart us)
-	// The new process handles its own health. If this process survives long enough
-	// to reach here, check health and rollback if needed.
-	// Snapshot config to avoid race with tests that swap globals.
 	restartFn := restartFunc
 	healthURL := HealthCheckURL
 	healthTimeout := HealthCheckTimeout
