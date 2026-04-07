@@ -18,10 +18,15 @@ var ValidRoles = map[string]bool{
 	"dev":  true,
 }
 
+// TokenFunc is a function that returns a fresh git auth token.
+// Called before each clone/pull if set.
+type TokenFunc func() (token string, err error)
+
 // Repo manages a local git clone of the client IDP repo.
 type Repo struct {
 	url       string
 	token     string
+	tokenFunc TokenFunc
 	localPath string
 	branch    string
 }
@@ -41,6 +46,11 @@ func NewRepo(repoURL, token, localPath string) (*Repo, error) {
 		localPath: localPath,
 		branch:    "main",
 	}, nil
+}
+
+// SetTokenFunc sets a function to fetch fresh tokens before git operations.
+func (r *Repo) SetTokenFunc(fn TokenFunc) {
+	r.tokenFunc = fn
 }
 
 // LocalPath returns the local path of the cloned repo.
@@ -66,6 +76,15 @@ func (r *Repo) sanitizeOutput(out []byte) string {
 // authURL injects the deploy token into the HTTPS URL.
 // https://github.com/org/repo -> https://x-access-token:TOKEN@github.com/org/repo
 func (r *Repo) authURL() (string, error) {
+	// Refresh token if a token function is set
+	if r.tokenFunc != nil {
+		freshToken, err := r.tokenFunc()
+		if err != nil {
+			return "", fmt.Errorf("fetching git token: %w", err)
+		}
+		r.token = freshToken
+	}
+
 	if r.token == "" {
 		return r.url, nil
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/kenitech-io/devops-agent/internal/logging"
 	"github.com/kenitech-io/devops-agent/internal/metrics"
 	"github.com/kenitech-io/devops-agent/internal/register"
+	"github.com/kenitech-io/devops-agent/internal/secrets"
 	"github.com/kenitech-io/devops-agent/internal/signing"
 	"github.com/kenitech-io/devops-agent/internal/update"
 	"github.com/kenitech-io/devops-agent/internal/wireguard"
@@ -147,11 +148,38 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 	var gitopsOp *gitops.Operator
 	repoURL := cfg.GetRepoURL()
 	serverRole := cfg.GetServerRole()
+
+	// If no repo URL in config, try fetching from dashboard
+	if repoURL == "" && cfg.DashboardURL != "" && cfg.AgentID != "" && cfg.WSToken != "" {
+		slog.Info("no repo URL in config, fetching from dashboard")
+		gitTokenResp, err := secrets.FetchGitToken(cfg.DashboardURL, cfg.AgentID, cfg.WSToken)
+		if err != nil {
+			slog.Warn("could not fetch git config from dashboard", "error", err)
+		} else if gitTokenResp.RepoURL != "" {
+			repoURL = gitTokenResp.RepoURL
+			cfg.RepoURL = repoURL
+			if saveErr := cfg.Save(); saveErr != nil {
+				slog.Warn("could not save repo URL to config", "error", saveErr)
+			}
+			slog.Info("fetched repo URL from dashboard", "url", repoURL)
+		}
+	}
+
 	if repoURL != "" && serverRole != "" {
 		repo, err := gitops.NewRepo(repoURL, cfg.GetDeployToken(), config.GitOpsDataDir)
 		if err != nil {
 			slog.Error("invalid gitops repo config", "error", err)
 		} else {
+			// Set token func to fetch fresh installation tokens from dashboard
+			if cfg.DashboardURL != "" && cfg.AgentID != "" && cfg.WSToken != "" {
+				repo.SetTokenFunc(func() (string, error) {
+					resp, err := secrets.FetchGitToken(cfg.DashboardURL, cfg.AgentID, cfg.WSToken)
+					if err != nil {
+						return "", err
+					}
+					return resp.Token, nil
+				})
+			}
 			gitopsOp = gitops.NewOperator(repo, serverRole)
 			gitopsOp.SetSecretsConfig(&gitops.SecretsConfig{
 				DashboardURL: cfg.DashboardURL,
