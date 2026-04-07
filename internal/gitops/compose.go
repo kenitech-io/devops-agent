@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -98,6 +99,87 @@ func ClearHashCache() {
 	composeHashMu.Lock()
 	composeHashes = make(map[string]string)
 	composeHashMu.Unlock()
+}
+
+// ClearHashForDir removes the cached hash for a single component directory,
+// forcing re-apply on next cycle even if compose files haven't changed.
+func ClearHashForDir(dir string) {
+	composeHashMu.Lock()
+	delete(composeHashes, dir)
+	composeHashMu.Unlock()
+}
+
+// DriftInfo describes the drift state of a single component.
+type DriftInfo struct {
+	Name           string `json:"name"`
+	Running        bool   `json:"running"`
+	ContainerCount int    `json:"containerCount"`
+	RunningCount   int    `json:"runningCount"`
+	Drifted        bool   `json:"drifted"`
+}
+
+// composeContainer is the JSON structure from docker compose ps --format json.
+type composeContainer struct {
+	State string `json:"State"`
+}
+
+// DriftCheck compares the expected state (compose file exists) with actual running containers.
+// Returns drift info showing whether any expected containers are not running.
+func DriftCheck(ctx context.Context, dir string) (*DriftInfo, error) {
+	name := filepath.Base(dir)
+	info := &DriftInfo{Name: name}
+
+	// Get ALL containers for this compose project (not just running)
+	cmd := exec.CommandContext(ctx, "docker", "compose", "ps", "--format", "json")
+	cmd.Dir = dir
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker compose ps for %s: %w", name, err)
+	}
+
+	output := strings.TrimSpace(string(out))
+	if output == "" || output == "[]" {
+		// No containers at all. This is drift if compose file exists.
+		_, composeErr := os.Stat(filepath.Join(dir, "docker-compose.yml"))
+		if composeErr == nil {
+			info.Drifted = true
+		}
+		return info, nil
+	}
+
+	// Parse JSON output. docker compose ps --format json outputs one JSON object per line
+	// or a JSON array depending on version.
+	var containers []composeContainer
+	if strings.HasPrefix(output, "[") {
+		if err := json.Unmarshal([]byte(output), &containers); err != nil {
+			return nil, fmt.Errorf("parse compose ps JSON array for %s: %w", name, err)
+		}
+	} else {
+		for _, line := range strings.Split(output, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var c composeContainer
+			if err := json.Unmarshal([]byte(line), &c); err != nil {
+				continue
+			}
+			containers = append(containers, c)
+		}
+	}
+
+	info.ContainerCount = len(containers)
+	for _, c := range containers {
+		if strings.EqualFold(c.State, "running") {
+			info.RunningCount++
+		}
+	}
+
+	info.Running = info.RunningCount > 0 && info.RunningCount == info.ContainerCount
+	info.Drifted = info.ContainerCount > 0 && info.RunningCount < info.ContainerCount
+
+	return info, nil
 }
 
 // ApplyAll applies docker compose for all component directories.

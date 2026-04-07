@@ -82,11 +82,14 @@ type WireGuardInfo struct {
 
 // GitOpsComponentStatus describes the state of one IDP component.
 type GitOpsComponentStatus struct {
-	Name      string `json:"name"`
-	Path      string `json:"path"`
-	Status    string `json:"status"` // "running", "stopped", "error", "pending"
-	Error     string `json:"error,omitempty"`
-	UpdatedAt string `json:"updatedAt,omitempty"`
+	Name           string `json:"name"`
+	Path           string `json:"path"`
+	Status         string `json:"status"` // "running", "stopped", "error", "pending"
+	Error          string `json:"error,omitempty"`
+	UpdatedAt      string `json:"updatedAt,omitempty"`
+	ContainerCount int    `json:"containerCount,omitempty"`
+	RunningCount   int    `json:"runningCount,omitempty"`
+	Drifted        bool   `json:"drifted,omitempty"`
 }
 
 // GitOpsStatus describes the GitOps operator state.

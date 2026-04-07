@@ -37,6 +37,7 @@ type Operator struct {
 	syncError    string
 	lastSync     time.Time
 	components   []*ComponentResult
+	driftInfo    map[string]*DriftInfo // component name -> drift state
 }
 
 // NewOperator creates a new GitOps operator.
@@ -164,9 +165,53 @@ func (o *Operator) pollAndApply(ctx context.Context) {
 		}
 	}
 
+	// Phase 6: Drift detection. Check all components are actually running,
+	// regardless of whether git changed. Auto-remediate drifted components.
+	o.checkAndRemediateDrift(ctx)
+
 	o.setStatus("synced", "")
 	o.mu.Lock()
 	o.lastSync = time.Now()
+	o.mu.Unlock()
+}
+
+// checkAndRemediateDrift checks if any expected containers are not running
+// and re-applies their compose files to restore them.
+func (o *Operator) checkAndRemediateDrift(ctx context.Context) {
+	dirs, err := o.repo.ComponentDirs(o.role)
+	if err != nil {
+		slog.Debug("drift check: cannot list component dirs", "error", err)
+		return
+	}
+	driftMap := make(map[string]*DriftInfo, len(dirs))
+
+	for _, dir := range dirs {
+		info, err := DriftCheck(ctx, dir)
+		if err != nil {
+			slog.Debug("drift check failed", "dir", dir, "error", err)
+			continue
+		}
+
+		driftMap[info.Name] = info
+
+		if info.Drifted {
+			slog.Warn("drift detected, re-applying component",
+				"component", info.Name,
+				"containers", info.ContainerCount,
+				"running", info.RunningCount,
+			)
+			ClearHashForDir(dir)
+			result := ApplyComponent(ctx, dir)
+			if result.Status == "error" {
+				slog.Error("drift remediation failed", "component", info.Name, "error", result.Error)
+			} else {
+				slog.Info("drift remediated", "component", info.Name)
+			}
+		}
+	}
+
+	o.mu.Lock()
+	o.driftInfo = driftMap
 	o.mu.Unlock()
 }
 
@@ -292,6 +337,12 @@ func (o *Operator) Status() *ws.GitOpsStatus {
 		}
 		if !c.UpdatedAt.IsZero() {
 			comp.UpdatedAt = c.UpdatedAt.UTC().Format(time.RFC3339)
+		}
+		// Populate drift info if available
+		if di, ok := o.driftInfo[c.Name]; ok {
+			comp.ContainerCount = di.ContainerCount
+			comp.RunningCount = di.RunningCount
+			comp.Drifted = di.Drifted
 		}
 		status.Components = append(status.Components, comp)
 	}
