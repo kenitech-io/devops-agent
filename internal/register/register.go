@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -156,4 +157,70 @@ func getKernelVersion() string {
 		return "unknown"
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// privateRanges are IP ranges that are NOT public.
+var privateRanges []*net.IPNet
+
+func init() {
+	for _, cidr := range []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"100.64.0.0/10",
+		"fc00::/7",
+		"fe80::/10",
+		"::1/128",
+	} {
+		_, block, _ := net.ParseCIDR(cidr)
+		privateRanges = append(privateRanges, block)
+	}
+}
+
+func isPublicIP(ip net.IP) bool {
+	if ip == nil || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	for _, r := range privateRanges {
+		if r.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+// PublicIP returns the first public IPv4 address found on network interfaces.
+func PublicIP() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil {
+				continue
+			}
+			// Prefer IPv4
+			if ip4 := ip.To4(); ip4 != nil && isPublicIP(ip4) {
+				return ip4.String()
+			}
+		}
+	}
+	return ""
 }

@@ -431,6 +431,7 @@ func sendConfigBackup(client *ws.Client, cfg *config.Config) {
 		DashboardURL:  cfg.DashboardURL,
 		AgentVersion:  version,
 		ConfigVersion: cfg.ConfigVersion,
+		PublicIP:      register.PublicIP(),
 	}
 
 	msg, err := ws.NewMessage(ws.TypeConfigBackup, payload)

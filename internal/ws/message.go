@@ -184,6 +184,7 @@ type ConfigBackupPayload struct {
 	DashboardURL  string `json:"dashboardUrl"`
 	AgentVersion  string `json:"agentVersion"`
 	ConfigVersion int    `json:"configVersion"`
+	PublicIP      string `json:"publicIp,omitempty"`
 }
 
 // AgentGoodbyePayload is sent before the agent disconnects.

@@ -271,7 +271,11 @@ func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
 
 	// Phase 1: Record component names and snapshot compose files before pull
 	oldNames := o.repo.ComponentDirNames(o.role)
-	dirs, _ := o.repo.ComponentDirs(o.role)
+	dirs, dirErr := o.repo.ComponentDirs(o.role)
+	if dirErr != nil {
+		slog.Debug("component dirs not available before pull (first deploy?)", "error", dirErr)
+		// Not fatal: on first deploy, role dir doesn't exist yet. It will exist after pull.
+	}
 	o.snapshot = snapshotComponents(dirs)
 
 	// Phase 2: Pull
@@ -398,7 +402,9 @@ func (o *Operator) verifyAndRollback(ctx context.Context, commitHash string, pro
 
 	dirs, err := o.repo.ComponentDirs(o.role)
 	if err != nil {
-		return nil // Can't verify without dirs
+		emit(fmt.Sprintf("Cannot verify health: %s", err))
+		slog.Error("health verification skipped: cannot list component dirs", "error", err)
+		return fmt.Errorf("cannot list dirs for health check: %w", err)
 	}
 
 	// Verify health of each component
@@ -443,9 +449,21 @@ func (o *Operator) verifyAndRollback(ctx context.Context, commitHash string, pro
 
 	// Clear hash cache and re-apply
 	ClearHashCache()
-	o.injectSecrets(dirs)
+	if err := o.injectSecrets(dirs); err != nil {
+		emit(fmt.Sprintf("WARNING: secret injection during rollback: %s", err))
+	}
 	emit("Re-applying previous configuration")
-	ApplyAll(ctx, dirs, progressFn)
+	rollbackResults := ApplyAll(ctx, dirs, progressFn)
+	var rollbackErrors int
+	for _, r := range rollbackResults {
+		if r.Status == "error" {
+			rollbackErrors++
+			slog.Error("rollback: component failed to re-apply", "name", r.Name, "error", r.Error)
+		}
+	}
+	if rollbackErrors > 0 {
+		emit(fmt.Sprintf("WARNING: %d components failed during rollback re-apply", rollbackErrors))
+	}
 
 	// Mark this commit as bad so we don't retry it
 	o.mu.Lock()
@@ -525,8 +543,15 @@ func (o *Operator) applyAll(ctx context.Context, progressFn ...ProgressFunc) err
 		return nil
 	}
 
-	// Inject secrets into .env files before applying
-	o.injectSecrets(dirs)
+	// Inject secrets into .env files before applying.
+	// If secret injection fails, proceed anyway: some components may work without secrets,
+	// and health checks will catch the ones that don't.
+	if err := o.injectSecrets(dirs); err != nil {
+		slog.Warn("secret injection had errors, proceeding with apply", "error", err)
+		if len(progressFn) > 0 && progressFn[0] != nil {
+			progressFn[0](fmt.Sprintf("WARNING: %s", err))
+		}
+	}
 
 	slog.Info("applying components", "count", len(dirs), "role", o.role)
 	results := ApplyAll(ctx, dirs, pf)
@@ -559,13 +584,14 @@ func (o *Operator) applyAll(ctx context.Context, progressFn ...ProgressFunc) err
 }
 
 // injectSecrets fetches secrets from the dashboard and injects them into .env
-// files that contain ${VAR} patterns. Non-fatal: logs errors but does not fail the sync.
-func (o *Operator) injectSecrets(dirs []string) {
+// files that contain ${VAR} patterns. Returns error if secrets could not be fetched
+// (so caller can decide whether to proceed or fail).
+func (o *Operator) injectSecrets(dirs []string) error {
 	if o.secretsCfg == nil || o.secretsCfg.DashboardURL == "" || o.secretsCfg.WSToken == "" {
-		return
+		return nil
 	}
 
-	// Check if any dir has an .env file with ${VAR} patterns before fetching
+	// Check if any dir has an .env file before fetching
 	hasEnvFiles := false
 	for _, dir := range dirs {
 		envPath := filepath.Join(dir, ".env")
@@ -575,19 +601,21 @@ func (o *Operator) injectSecrets(dirs []string) {
 		}
 	}
 	if !hasEnvFiles {
-		return
+		return nil
 	}
 
 	fetched, err := secrets.FetchSecrets(o.secretsCfg.DashboardURL, o.secretsCfg.AgentID, o.secretsCfg.WSToken)
 	if err != nil {
 		slog.Error("failed to fetch secrets from dashboard", "error", err)
-		return
+		return fmt.Errorf("fetch secrets: %w", err)
 	}
 
 	if len(fetched) == 0 {
-		return
+		slog.Info("no secrets returned from dashboard")
+		return nil
 	}
 
+	var injected, failed int
 	for _, dir := range dirs {
 		envPath := filepath.Join(dir, ".env")
 		if _, err := os.Stat(envPath); err != nil {
@@ -595,8 +623,17 @@ func (o *Operator) injectSecrets(dirs []string) {
 		}
 		if err := secrets.InjectSecrets(envPath, fetched); err != nil {
 			slog.Error("failed to inject secrets", "dir", dir, "error", err)
+			failed++
+		} else {
+			injected++
 		}
 	}
+	slog.Info("secret injection complete", "injected", injected, "failed", failed)
+
+	if failed > 0 {
+		return fmt.Errorf("secret injection failed for %d component(s)", failed)
+	}
+	return nil
 }
 
 func (o *Operator) setStatus(status, errMsg string) {
