@@ -136,8 +136,8 @@ func TestDownloadBinary(t *testing.T) {
 	tmpFile.Close()
 	defer os.Remove(tmpFile.Name())
 
-	if err := downloadBinary(server.URL, tmpFile.Name()); err != nil {
-		t.Fatalf("downloadBinary error: %v", err)
+	if err := downloadFile(server.URL, tmpFile.Name()); err != nil {
+		t.Fatalf("downloadFile error: %v", err)
 	}
 
 	data, err := os.ReadFile(tmpFile.Name())
@@ -147,12 +147,6 @@ func TestDownloadBinary(t *testing.T) {
 
 	if string(data) != string(content) {
 		t.Errorf("expected %q, got %q", content, data)
-	}
-
-	// Check file is executable
-	info, _ := os.Stat(tmpFile.Name())
-	if info.Mode().Perm()&0100 == 0 {
-		t.Error("expected executable permission on downloaded binary")
 	}
 }
 
@@ -169,7 +163,7 @@ func TestDownloadBinary_ServerError(t *testing.T) {
 	tmpFile.Close()
 	defer os.Remove(tmpFile.Name())
 
-	err = downloadBinary(server.URL, tmpFile.Name())
+	err = downloadFile(server.URL, tmpFile.Name())
 	if err == nil {
 		t.Error("expected error for server error response")
 	}
@@ -411,7 +405,7 @@ func TestDownloadBinary_NotFoundResponse(t *testing.T) {
 	tmpFile.Close()
 	defer os.Remove(tmpFile.Name())
 
-	err = downloadBinary(server.URL, tmpFile.Name())
+	err = downloadFile(server.URL, tmpFile.Name())
 	if err == nil {
 		t.Error("expected error for 404 response")
 	}
@@ -436,8 +430,8 @@ func TestDownloadBinary_RedirectToContent(t *testing.T) {
 	tmpFile.Close()
 	defer os.Remove(tmpFile.Name())
 
-	if err := downloadBinary(server.URL+"/download", tmpFile.Name()); err != nil {
-		t.Fatalf("downloadBinary with redirect failed: %v", err)
+	if err := downloadFile(server.URL+"/download", tmpFile.Name()); err != nil {
+		t.Fatalf("downloadFile with redirect failed: %v", err)
 	}
 
 	data, _ := os.ReadFile(tmpFile.Name())
@@ -466,8 +460,8 @@ func TestDownloadBinary_LargeFile(t *testing.T) {
 	tmpFile.Close()
 	defer os.Remove(tmpFile.Name())
 
-	if err := downloadBinary(server.URL, tmpFile.Name()); err != nil {
-		t.Fatalf("downloadBinary with large file failed: %v", err)
+	if err := downloadFile(server.URL, tmpFile.Name()); err != nil {
+		t.Fatalf("downloadFile with large file failed: %v", err)
 	}
 
 	info, _ := os.Stat(tmpFile.Name())
@@ -484,7 +478,7 @@ func TestDownloadBinary_InvalidURL(t *testing.T) {
 	tmpFile.Close()
 	defer os.Remove(tmpFile.Name())
 
-	err = downloadBinary("http://127.0.0.1:0/nonexistent", tmpFile.Name())
+	err = downloadFile("http://127.0.0.1:0/nonexistent", tmpFile.Name())
 	if err == nil {
 		t.Error("expected error for connection refused / invalid URL")
 	}
@@ -519,7 +513,7 @@ func TestDownloadBinary_StatusCodes(t *testing.T) {
 			tmpFile.Close()
 			defer os.Remove(tmpFile.Name())
 
-			err = downloadBinary(server.URL, tmpFile.Name())
+			err = downloadFile(server.URL, tmpFile.Name())
 			if tt.wantErr && err == nil {
 				t.Errorf("expected error for status %d", tt.statusCode)
 			}
@@ -1091,7 +1085,7 @@ func TestDownloadBinary_DestPathInvalid(t *testing.T) {
 	defer server.Close()
 
 	// Destination in a non-existent directory
-	err := downloadBinary(server.URL, "/tmp/keni-nonexistent-dir-xyz/binary")
+	err := downloadFile(server.URL, "/tmp/keni-nonexistent-dir-xyz/binary")
 	if err == nil {
 		t.Error("expected error when destination directory does not exist")
 	}

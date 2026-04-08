@@ -184,22 +184,60 @@ func UpdateWithProgress(downloadURL, expectedChecksum string, progress ProgressF
 		return fmt.Errorf("getting current executable path: %w", err)
 	}
 
-	report("Downloading binary", "running", filepath.Base(downloadURL))
+	isTarGz := strings.HasSuffix(downloadURL, ".tar.gz") || strings.HasSuffix(downloadURL, ".tgz")
 	tmpPath := currentPath + ".download"
-	if err := downloadBinary(downloadURL, tmpPath); err != nil {
-		os.Remove(tmpPath)
-		report("Downloading binary", "error", err.Error())
-		return fmt.Errorf("downloading binary: %w", err)
+
+	if isTarGz {
+		// For tar.gz: download archive, verify checksum on archive, then extract binary.
+		archivePath := currentPath + ".tar.gz"
+		report("Downloading binary", "running", filepath.Base(downloadURL))
+		if err := downloadFile(downloadURL, archivePath); err != nil {
+			os.Remove(archivePath)
+			report("Downloading binary", "error", err.Error())
+			return fmt.Errorf("downloading binary: %w", err)
+		}
+		defer os.Remove(archivePath)
+		report("Downloading binary", "done", "")
+
+		report("Verifying checksum", "running", "")
+		if err := verifyChecksum(archivePath, expectedChecksum); err != nil {
+			report("Verifying checksum", "error", err.Error())
+			return fmt.Errorf("checksum verification failed: %w", err)
+		}
+		report("Verifying checksum", "done", "")
+
+		report("Extracting binary", "running", "")
+		f, err := os.Open(archivePath)
+		if err != nil {
+			report("Extracting binary", "error", err.Error())
+			return fmt.Errorf("opening archive: %w", err)
+		}
+		defer f.Close()
+		if err := extractBinaryFromTarGz(f, tmpPath); err != nil {
+			os.Remove(tmpPath)
+			report("Extracting binary", "error", err.Error())
+			return fmt.Errorf("extracting binary: %w", err)
+		}
+		report("Extracting binary", "done", "")
+	} else {
+		// Raw binary: download and verify checksum directly.
+		report("Downloading binary", "running", filepath.Base(downloadURL))
+		if err := downloadFile(downloadURL, tmpPath); err != nil {
+			os.Remove(tmpPath)
+			report("Downloading binary", "error", err.Error())
+			return fmt.Errorf("downloading binary: %w", err)
+		}
+		report("Downloading binary", "done", "")
+
+		report("Verifying checksum", "running", "")
+		if err := verifyChecksum(tmpPath, expectedChecksum); err != nil {
+			os.Remove(tmpPath)
+			report("Verifying checksum", "error", err.Error())
+			return fmt.Errorf("checksum verification failed: %w", err)
+		}
+		report("Verifying checksum", "done", "")
 	}
 	defer os.Remove(tmpPath)
-	report("Downloading binary", "done", "")
-
-	report("Verifying checksum", "running", "")
-	if err := verifyChecksum(tmpPath, expectedChecksum); err != nil {
-		report("Verifying checksum", "error", err.Error())
-		return fmt.Errorf("checksum verification failed: %w", err)
-	}
-	report("Verifying checksum", "done", "")
 
 	markerPath := UpdateMarkerPath
 	if markerOverride := markerPathOverride; markerOverride != "" {
@@ -268,7 +306,7 @@ func UpdateWithProgress(downloadURL, expectedChecksum string, progress ProgressF
 	return nil
 }
 
-func downloadBinary(rawURL, destPath string) error {
+func downloadFile(rawURL, destPath string) error {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Get(rawURL)
 	if err != nil {
@@ -280,12 +318,6 @@ func downloadBinary(rawURL, destPath string) error {
 		return fmt.Errorf("download returned status %d", resp.StatusCode)
 	}
 
-	// If the URL points to a .tar.gz, extract the binary from inside
-	if strings.HasSuffix(rawURL, ".tar.gz") || strings.HasSuffix(rawURL, ".tgz") {
-		return extractBinaryFromTarGz(resp.Body, destPath)
-	}
-
-	// Raw binary download
 	out, err := os.Create(destPath)
 	if err != nil {
 		return err
@@ -296,7 +328,7 @@ func downloadBinary(rawURL, destPath string) error {
 		return err
 	}
 
-	return out.Chmod(0755)
+	return nil
 }
 
 // extractBinaryFromTarGz reads a tar.gz stream and extracts the first executable file
