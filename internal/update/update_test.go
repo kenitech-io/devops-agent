@@ -901,7 +901,13 @@ func TestValidateDownloadURL(t *testing.T) {
 		errMsg  string
 	}{
 		{
-			name:    "valid github release URL",
+			name:    "valid github release URL (kenidevops)",
+			url:     "https://github.com/kenidevops/devops-agent/releases/download/v1.0.0/keni-agent-linux-arm64",
+			devMode: false,
+			wantErr: false,
+		},
+		{
+			name:    "valid github release URL (kenitech-io legacy)",
 			url:     "https://github.com/kenitech-io/devops-agent/releases/download/v1.0.0/keni-agent-linux-arm64",
 			devMode: false,
 			wantErr: false,
@@ -976,7 +982,7 @@ func TestValidateDownloadURL(t *testing.T) {
 			url:     "https://github.com/evil-org/malware/releases/download/v1/binary",
 			devMode: false,
 			wantErr: true,
-			errMsg:  "kenitech-io",
+			errMsg:  "kenidevops",
 		},
 		{
 			name:    "ftp scheme rejected",

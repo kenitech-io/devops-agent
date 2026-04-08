@@ -94,7 +94,7 @@ func isDevMode() bool {
 
 // ValidateDownloadURL checks that the given URL is safe for downloading an update.
 // It enforces HTTPS (unless dev mode), and only allows hosts in AllowedHosts,
-// hosts matching *.kenitech.io, or github.com/kenitech-io/ paths.
+// hosts matching *.kenitech.io, or github.com/kenidevops/ paths.
 // In dev mode, localhost and 127.0.0.1 are also permitted over HTTP.
 func ValidateDownloadURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
@@ -130,10 +130,10 @@ func ValidateDownloadURL(rawURL string) error {
 	// Check AllowedHosts exact match
 	for _, allowed := range AllowedHosts {
 		if host == strings.ToLower(allowed) {
-			// For github.com, also require the kenitech-io org path
+			// For github.com, require the kenidevops org path
 			if host == "github.com" {
-				if !strings.HasPrefix(parsed.Path, "/kenitech-io/") {
-					return fmt.Errorf("github.com downloads must be from /kenitech-io/, got path: %s", parsed.Path)
+				if !strings.HasPrefix(parsed.Path, "/kenidevops/") && !strings.HasPrefix(parsed.Path, "/kenitech-io/") {
+					return fmt.Errorf("github.com downloads must be from /kenidevops/, got path: %s", parsed.Path)
 				}
 			}
 			return nil
