@@ -205,7 +205,7 @@ SyslogIdentifier=keni-agent
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/etc/keni-agent /etc/wireguard
+ReadWritePaths=/etc/keni-agent /etc/wireguard /var/lib/keni-agent /usr/local/bin
 PrivateTmp=yes
 
 [Install]
