@@ -239,7 +239,7 @@ func TestOperator_pollAndApply_PullError(t *testing.T) {
 
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 	repo := mustNewRepo(t, remoteDir, "", cloneDir)
-	if err := repo.Clone(); err != nil {
+	if err := repo.Clone(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 

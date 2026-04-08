@@ -549,16 +549,11 @@ func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Messag
 			client.Send(streamMsg)
 		})
 		if err != nil {
-			metrics.CommandsExecuted.WithLabelValues(req.Action, "error").Inc()
-			slog.Error("command failed", "action", req.Action, "error", err)
-			sendError(client, extractErrorCode(err), err.Error(), msg.ID)
+			recordCommandError(client, msg.ID, req.Action, err)
 			return
 		}
 
-		metrics.CommandsExecuted.WithLabelValues(req.Action, "success").Inc()
-		metrics.CommandDuration.WithLabelValues(req.Action).Observe(float64(result.DurationMs))
-		slog.Info("command completed", "action", req.Action, "exit_code", result.ExitCode, "duration_ms", result.DurationMs)
-
+		recordCommandSuccess(req.Action, result.DurationMs, result.ExitCode)
 		completeMsg, _ := ws.NewMessage(ws.TypeCommandComplete, ws.CommandCompletePayload{
 			RequestID:  msg.ID,
 			ExitCode:   result.ExitCode,
@@ -568,16 +563,11 @@ func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Messag
 	} else {
 		result, err := commands.Execute(cmdCtx, req.Action, req.Params)
 		if err != nil {
-			metrics.CommandsExecuted.WithLabelValues(req.Action, "error").Inc()
-			slog.Error("command failed", "action", req.Action, "error", err)
-			sendError(client, extractErrorCode(err), err.Error(), msg.ID)
+			recordCommandError(client, msg.ID, req.Action, err)
 			return
 		}
 
-		metrics.CommandsExecuted.WithLabelValues(req.Action, "success").Inc()
-		metrics.CommandDuration.WithLabelValues(req.Action).Observe(float64(result.DurationMs))
-		slog.Info("command completed", "action", req.Action, "exit_code", result.ExitCode, "duration_ms", result.DurationMs)
-
+		recordCommandSuccess(req.Action, result.DurationMs, result.ExitCode)
 		resultMsg, _ := ws.NewMessage(ws.TypeCommandResult, ws.CommandResultPayload{
 			RequestID:  msg.ID,
 			ExitCode:   result.ExitCode,
@@ -587,6 +577,18 @@ func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Messag
 		})
 		client.Send(resultMsg)
 	}
+}
+
+func recordCommandError(client *ws.Client, requestID, action string, err error) {
+	metrics.CommandsExecuted.WithLabelValues(action, "error").Inc()
+	slog.Error("command failed", "action", action, "error", err)
+	sendError(client, extractErrorCode(err), err.Error(), requestID)
+}
+
+func recordCommandSuccess(action string, durationMs int64, exitCode int) {
+	metrics.CommandsExecuted.WithLabelValues(action, "success").Inc()
+	metrics.CommandDuration.WithLabelValues(action).Observe(float64(durationMs))
+	slog.Info("command completed", "action", action, "exit_code", exitCode, "duration_ms", durationMs)
 }
 
 func handleUpdateAvailable(client *ws.Client, msg *ws.Message) {

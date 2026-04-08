@@ -173,7 +173,7 @@ func (o *Operator) Run(ctx context.Context) error {
 
 	// Phase 1: Clone
 	o.setStatus("syncing", "")
-	if err := o.repo.Clone(); err != nil {
+	if err := o.repo.Clone(ctx); err != nil {
 		o.setStatus("error", fmt.Sprintf("clone failed: %s", err))
 		return fmt.Errorf("initial clone: %w", err)
 	}
@@ -234,7 +234,7 @@ func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
 
 	// Phase 2: Pull
 	emit("--- git pull ---")
-	updated, err := o.repo.Pull(progressFn)
+	updated, err := o.repo.Pull(ctx, progressFn)
 	if err != nil {
 		o.setStatus("error", fmt.Sprintf("pull failed: %s", err))
 		slog.Error("git pull failed", "error", err)

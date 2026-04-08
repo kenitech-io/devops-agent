@@ -17,6 +17,7 @@ var AllowedDeployRoots = []string{"/srv/devops"}
 // AllowedImagePrefixes restricts which container images can be deployed.
 var AllowedImagePrefixes = []string{
 	"ghcr.io/moghtech/",
+	"ghcr.io/kenidevops/",
 	"ghcr.io/kenitech-io/",
 	"registry.kenitech.io/",
 }

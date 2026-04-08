@@ -124,7 +124,7 @@ func (r *Repo) stripCredentialFromRemote() {
 }
 
 // Clone clones the repo to the local path. If already cloned, does nothing.
-func (r *Repo) Clone(progressFn ...ProgressFunc) error {
+func (r *Repo) Clone(ctx context.Context, progressFn ...ProgressFunc) error {
 	if _, err := os.Stat(filepath.Join(r.localPath, ".git")); err == nil {
 		slog.Info("repo already cloned", "path", r.localPath)
 		return nil
@@ -146,7 +146,7 @@ func (r *Repo) Clone(progressFn ...ProgressFunc) error {
 		pf = progressFn[0]
 	}
 
-	cmd := exec.CommandContext(context.Background(), "git", "clone",
+	cmd := exec.CommandContext(ctx, "git", "clone",
 		"--depth", "1",
 		"--branch", r.branch,
 		"--single-branch",
@@ -171,7 +171,7 @@ func (r *Repo) Clone(progressFn ...ProgressFunc) error {
 
 // Pull fetches and fast-forwards to the latest commit.
 // Returns true if the repo was updated (new commits), false if already up to date.
-func (r *Repo) Pull(progressFn ...ProgressFunc) (bool, error) {
+func (r *Repo) Pull(ctx context.Context, progressFn ...ProgressFunc) (bool, error) {
 	oldHash, err := r.CommitHash()
 	if err != nil {
 		return false, fmt.Errorf("getting current hash: %w", err)
@@ -189,7 +189,7 @@ func (r *Repo) Pull(progressFn ...ProgressFunc) (bool, error) {
 	sanitized := r.sanitizeProgressFn(pf)
 
 	// Fetch using positional URL (not stored remote) so the token is not persisted.
-	fetchCmd := exec.CommandContext(context.Background(), "git", "fetch", "--depth", "1", authURL, r.branch)
+	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "--depth", "1", authURL, r.branch)
 	fetchCmd.Dir = r.localPath
 	fetchCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 
@@ -199,7 +199,7 @@ func (r *Repo) Pull(progressFn ...ProgressFunc) (bool, error) {
 	}
 
 	// Reset to fetched commit.
-	resetCmd := exec.CommandContext(context.Background(), "git", "reset", "--hard", "FETCH_HEAD")
+	resetCmd := exec.CommandContext(ctx, "git", "reset", "--hard", "FETCH_HEAD")
 	resetCmd.Dir = r.localPath
 	out, err = runStreamingCmd(resetCmd, sanitized)
 	if err != nil {

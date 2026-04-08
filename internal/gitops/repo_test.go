@@ -1,6 +1,7 @@
 package gitops
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,7 +154,7 @@ func TestClone_AlreadyCloned(t *testing.T) {
 	}
 
 	r := mustNewRepo(t, "https://github.com/org/repo", "", repoDir)
-	if err := r.Clone(); err != nil {
+	if err := r.Clone(context.Background()); err != nil {
 		t.Fatalf("expected no error for already cloned repo, got: %v", err)
 	}
 }
@@ -166,7 +167,7 @@ func TestClone_ParentDirCreationFails(t *testing.T) {
 	}
 
 	r := mustNewRepo(t, "https://github.com/org/repo", "", filepath.Join(blocker, "sub", "clone"))
-	err := r.Clone()
+	err := r.Clone(context.Background())
 	if err == nil {
 		t.Fatal("expected error when parent dir creation fails")
 	}
@@ -182,7 +183,7 @@ func TestClone_InvalidRemote(t *testing.T) {
 
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 	r := mustNewRepo(t, "/nonexistent/bare/repo", "", cloneDir)
-	err := r.Clone()
+	err := r.Clone(context.Background())
 	if err == nil {
 		t.Fatal("expected error for invalid remote")
 	}
@@ -201,7 +202,7 @@ func TestCloneAndPull(t *testing.T) {
 	// Clone using our Repo
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 	r := mustNewRepo(t, remoteDir, "", cloneDir)
-	if err := r.Clone(); err != nil {
+	if err := r.Clone(context.Background()); err != nil {
 		t.Fatalf("clone failed: %v", err)
 	}
 
@@ -226,7 +227,7 @@ func TestCloneAndPull(t *testing.T) {
 	}
 
 	// Pull with no changes
-	updated, err := r.Pull()
+	updated, err := r.Pull(context.Background())
 	if err != nil {
 		t.Fatalf("pull failed: %v", err)
 	}
@@ -244,7 +245,7 @@ func TestCloneAndPull(t *testing.T) {
 	run(t, workDir, "git", "push", "origin", "main")
 
 	// Pull should detect change
-	updated, err = r.Pull()
+	updated, err = r.Pull(context.Background())
 	if err != nil {
 		t.Fatalf("pull after push failed: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestClone_StripsCredentialFromRemote(t *testing.T) {
 
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 	r := mustNewRepo(t, remoteDir, "", cloneDir)
-	if err := r.Clone(); err != nil {
+	if err := r.Clone(context.Background()); err != nil {
 		t.Fatalf("clone failed: %v", err)
 	}
 

@@ -173,11 +173,11 @@ func runSimple(name string, args ...string) string {
 }
 
 func parseLoadAvg() []float64 {
-	out, err := exec.Command("cat", "/proc/loadavg").Output()
+	data, err := os.ReadFile("/proc/loadavg")
 	if err != nil {
 		return []float64{0, 0, 0}
 	}
-	parts := strings.Fields(string(out))
+	parts := strings.Fields(string(data))
 	result := make([]float64, 3)
 	for i := 0; i < 3 && i < len(parts); i++ {
 		val, _ := strconv.ParseFloat(parts[i], 64)
@@ -524,14 +524,27 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 // maxParamLength is the maximum allowed length for string parameters.
 const maxParamLength = 1024
 
-func extractStringParam(params json.RawMessage, key string) (string, error) {
+// parseParams unmarshals the raw JSON params into a map once.
+func parseParams(params json.RawMessage) (map[string]json.RawMessage, error) {
 	if params == nil {
-		return "", fmt.Errorf("missing params")
+		return nil, fmt.Errorf("missing params")
 	}
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(params, &m); err != nil {
-		return "", fmt.Errorf("parsing params: %w", err)
+		return nil, fmt.Errorf("parsing params: %w", err)
 	}
+	return m, nil
+}
+
+func extractStringParam(params json.RawMessage, key string) (string, error) {
+	m, err := parseParams(params)
+	if err != nil {
+		return "", err
+	}
+	return stringFromMap(m, key)
+}
+
+func stringFromMap(m map[string]json.RawMessage, key string) (string, error) {
 	raw, ok := m[key]
 	if !ok {
 		return "", fmt.Errorf("missing required param %q", key)
@@ -547,13 +560,18 @@ func extractStringParam(params json.RawMessage, key string) (string, error) {
 }
 
 func extractOptionalIntParam(params json.RawMessage, key string, defaultVal int) (int, error) {
-	if params == nil {
-		return defaultVal, nil
+	m, err := parseParams(params)
+	if err != nil {
+		// nil params is valid for optional params
+		if params == nil {
+			return defaultVal, nil
+		}
+		return 0, err
 	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(params, &m); err != nil {
-		return 0, fmt.Errorf("parsing params: %w", err)
-	}
+	return optionalIntFromMap(m, key, defaultVal)
+}
+
+func optionalIntFromMap(m map[string]json.RawMessage, key string, defaultVal int) (int, error) {
 	raw, ok := m[key]
 	if !ok {
 		return defaultVal, nil
@@ -566,13 +584,14 @@ func extractOptionalIntParam(params json.RawMessage, key string, defaultVal int)
 }
 
 func extractIntParam(params json.RawMessage, key string) (int, error) {
-	if params == nil {
-		return 0, fmt.Errorf("missing params")
+	m, err := parseParams(params)
+	if err != nil {
+		return 0, err
 	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(params, &m); err != nil {
-		return 0, fmt.Errorf("parsing params: %w", err)
-	}
+	return intFromMap(m, key)
+}
+
+func intFromMap(m map[string]json.RawMessage, key string) (int, error) {
 	raw, ok := m[key]
 	if !ok {
 		return 0, fmt.Errorf("missing required param %q", key)
