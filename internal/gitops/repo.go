@@ -1,6 +1,7 @@
 package gitops
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -63,6 +64,20 @@ func (r *Repo) Branch() string {
 	return r.branch
 }
 
+// sanitizeProgressFn wraps a ProgressFunc to strip the deploy token from
+// every line before forwarding. Returns nil if the input is nil.
+func (r *Repo) sanitizeProgressFn(fn ProgressFunc) ProgressFunc {
+	if fn == nil {
+		return nil
+	}
+	return func(line string) {
+		if r.token != "" {
+			line = strings.ReplaceAll(line, r.token, "[REDACTED]")
+		}
+		fn(line)
+	}
+}
+
 // sanitizeOutput removes the deploy token from git command output to prevent
 // credential leakage in logs and error messages.
 func (r *Repo) sanitizeOutput(out []byte) string {
@@ -109,7 +124,7 @@ func (r *Repo) stripCredentialFromRemote() {
 }
 
 // Clone clones the repo to the local path. If already cloned, does nothing.
-func (r *Repo) Clone() error {
+func (r *Repo) Clone(progressFn ...ProgressFunc) error {
 	if _, err := os.Stat(filepath.Join(r.localPath, ".git")); err == nil {
 		slog.Info("repo already cloned", "path", r.localPath)
 		return nil
@@ -126,7 +141,12 @@ func (r *Repo) Clone() error {
 
 	slog.Info("cloning IDP repo", "url", r.url, "path", r.localPath, "branch", r.branch)
 
-	cmd := exec.Command("git", "clone",
+	var pf ProgressFunc
+	if len(progressFn) > 0 {
+		pf = progressFn[0]
+	}
+
+	cmd := exec.CommandContext(context.Background(), "git", "clone",
 		"--depth", "1",
 		"--branch", r.branch,
 		"--single-branch",
@@ -135,9 +155,9 @@ func (r *Repo) Clone() error {
 	)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 
-	out, err := cmd.CombinedOutput()
+	out, err := runStreamingCmd(cmd, r.sanitizeProgressFn(pf))
 	if err != nil {
-		return fmt.Errorf("git clone failed: %w\n%s", err, r.sanitizeOutput(out))
+		return fmt.Errorf("git clone failed: %w\n%s", err, r.sanitizeOutput([]byte(out)))
 	}
 
 	// Remove the auth token from the stored remote URL in .git/config.
@@ -151,7 +171,7 @@ func (r *Repo) Clone() error {
 
 // Pull fetches and fast-forwards to the latest commit.
 // Returns true if the repo was updated (new commits), false if already up to date.
-func (r *Repo) Pull() (bool, error) {
+func (r *Repo) Pull(progressFn ...ProgressFunc) (bool, error) {
 	oldHash, err := r.CommitHash()
 	if err != nil {
 		return false, fmt.Errorf("getting current hash: %w", err)
@@ -162,22 +182,28 @@ func (r *Repo) Pull() (bool, error) {
 		return false, err
 	}
 
-	// Fetch using positional URL (not stored remote) so the token is not persisted.
-	cmd := exec.Command("git", "fetch", "--depth", "1", authURL, r.branch)
-	cmd.Dir = r.localPath
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	var pf ProgressFunc
+	if len(progressFn) > 0 {
+		pf = progressFn[0]
+	}
+	sanitized := r.sanitizeProgressFn(pf)
 
-	out, err := cmd.CombinedOutput()
+	// Fetch using positional URL (not stored remote) so the token is not persisted.
+	fetchCmd := exec.CommandContext(context.Background(), "git", "fetch", "--depth", "1", authURL, r.branch)
+	fetchCmd.Dir = r.localPath
+	fetchCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+
+	out, err := runStreamingCmd(fetchCmd, sanitized)
 	if err != nil {
-		return false, fmt.Errorf("git fetch failed: %w\n%s", err, r.sanitizeOutput(out))
+		return false, fmt.Errorf("git fetch failed: %w\n%s", err, r.sanitizeOutput([]byte(out)))
 	}
 
 	// Reset to fetched commit.
-	cmd = exec.Command("git", "reset", "--hard", "FETCH_HEAD")
-	cmd.Dir = r.localPath
-	out, err = cmd.CombinedOutput()
+	resetCmd := exec.CommandContext(context.Background(), "git", "reset", "--hard", "FETCH_HEAD")
+	resetCmd.Dir = r.localPath
+	out, err = runStreamingCmd(resetCmd, sanitized)
 	if err != nil {
-		return false, fmt.Errorf("git reset failed: %w\n%s", err, r.sanitizeOutput(out))
+		return false, fmt.Errorf("git reset failed: %w\n%s", err, r.sanitizeOutput([]byte(out)))
 	}
 
 	newHash, err := r.CommitHash()
@@ -187,9 +213,15 @@ func (r *Repo) Pull() (bool, error) {
 
 	if oldHash != newHash {
 		slog.Info("repo updated", "from", oldHash[:8], "to", newHash[:8])
+		if pf != nil {
+			pf(fmt.Sprintf("Updated %s -> %s", oldHash[:8], newHash[:8]))
+		}
 		return true, nil
 	}
 
+	if pf != nil {
+		pf(fmt.Sprintf("Already up to date at %s", oldHash[:8]))
+	}
 	return false, nil
 }
 

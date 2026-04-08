@@ -47,12 +47,17 @@ func composeFileHash(dir string) (string, error) {
 
 // ApplyComponent runs docker compose up -d in the given component directory.
 // Skips unchanged components (compose file + .env hash match) to avoid unnecessary restarts.
-func ApplyComponent(ctx context.Context, dir string) *ComponentResult {
+func ApplyComponent(ctx context.Context, dir string, progressFn ...ProgressFunc) *ComponentResult {
 	name := filepath.Base(dir)
 	result := &ComponentResult{
 		Name:      name,
 		Path:      dir,
 		UpdatedAt: time.Now(),
+	}
+
+	var pf ProgressFunc
+	if len(progressFn) > 0 {
+		pf = progressFn[0]
 	}
 
 	// Check if compose files changed since last apply
@@ -64,21 +69,38 @@ func ApplyComponent(ctx context.Context, dir string) *ComponentResult {
 
 		if exists && oldHash == newHash {
 			slog.Debug("component unchanged, skipping", "name", name)
+			if pf != nil {
+				pf(fmt.Sprintf("[%s] unchanged, skipping", name))
+			}
 			result.Status = "running"
 			return result
 		}
 	}
 
 	slog.Info("applying component", "name", name, "dir", dir)
+	if pf != nil {
+		pf(fmt.Sprintf("[%s] docker compose up -d --pull always --remove-orphans", name))
+	}
 
 	cmd := exec.CommandContext(ctx, "docker", "compose", "up", "-d", "--pull", "always", "--remove-orphans")
 	cmd.Dir = dir
 
-	out, err := cmd.CombinedOutput()
+	// Prefix each output line with the component name.
+	var compPf ProgressFunc
+	if pf != nil {
+		compPf = func(line string) {
+			pf(fmt.Sprintf("[%s] %s", name, line))
+		}
+	}
+
+	out, err := runStreamingCmd(cmd, compPf)
 	if err != nil {
 		result.Status = "error"
-		result.Error = fmt.Sprintf("%s: %s", err, strings.TrimSpace(string(out)))
+		result.Error = fmt.Sprintf("%s: %s", err, strings.TrimSpace(out))
 		slog.Error("component apply failed", "name", name, "error", result.Error)
+		if pf != nil {
+			pf(fmt.Sprintf("[%s] ERROR: %s", name, result.Error))
+		}
 		return result
 	}
 
@@ -91,6 +113,9 @@ func ApplyComponent(ctx context.Context, dir string) *ComponentResult {
 
 	result.Status = "running"
 	slog.Info("component applied", "name", name)
+	if pf != nil {
+		pf(fmt.Sprintf("[%s] applied successfully", name))
+	}
 	return result
 }
 
@@ -184,10 +209,14 @@ func DriftCheck(ctx context.Context, dir string) (*DriftInfo, error) {
 
 // ApplyAll applies docker compose for all component directories.
 // Returns results for each component.
-func ApplyAll(ctx context.Context, dirs []string) []*ComponentResult {
+func ApplyAll(ctx context.Context, dirs []string, progressFn ...ProgressFunc) []*ComponentResult {
+	var pf ProgressFunc
+	if len(progressFn) > 0 {
+		pf = progressFn[0]
+	}
 	var results []*ComponentResult
 	for _, dir := range dirs {
-		result := ApplyComponent(ctx, dir)
+		result := ApplyComponent(ctx, dir, pf)
 		results = append(results, result)
 	}
 	return results
@@ -210,12 +239,29 @@ func StopComponent(ctx context.Context, dir string) error {
 
 // StopComponentByProject stops a compose project by name without needing
 // a compose file on disk. Uses Docker's project label to find containers.
-func StopComponentByProject(ctx context.Context, projectName string) error {
+func StopComponentByProject(ctx context.Context, projectName string, progressFn ...ProgressFunc) error {
 	slog.Info("stopping removed component by project name", "project", projectName)
+
+	var pf ProgressFunc
+	if len(progressFn) > 0 {
+		pf = progressFn[0]
+	}
+	if pf != nil {
+		pf(fmt.Sprintf("[%s] docker compose down --remove-orphans", projectName))
+	}
+
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "down", "--remove-orphans")
-	out, err := cmd.CombinedOutput()
+
+	var compPf ProgressFunc
+	if pf != nil {
+		compPf = func(line string) {
+			pf(fmt.Sprintf("[%s] %s", projectName, line))
+		}
+	}
+
+	out, err := runStreamingCmd(cmd, compPf)
 	if err != nil {
-		return fmt.Errorf("docker compose down -p %s: %w\n%s", projectName, err, string(out))
+		return fmt.Errorf("docker compose down -p %s: %w\n%s", projectName, err, out)
 	}
 	return nil
 }

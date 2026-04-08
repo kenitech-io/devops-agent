@@ -23,6 +23,19 @@ type SecretsConfig struct {
 	WSToken      string
 }
 
+// SyncResult holds the outcome of a single sync cycle.
+type SyncResult struct {
+	CommitHash string
+	Updated    bool
+	Components []*ComponentResult
+	DriftInfo  map[string]*DriftInfo
+	Error      string
+	DurationMs int64
+}
+
+// SyncNotifyFunc is called after every sync cycle with the result.
+type SyncNotifyFunc func(SyncResult)
+
 // Operator manages the GitOps lifecycle: clone, poll, apply, report.
 type Operator struct {
 	repo         *Repo
@@ -30,6 +43,7 @@ type Operator struct {
 	pollInterval time.Duration
 	triggerCh    chan struct{}
 	secretsCfg   *SecretsConfig
+	onSyncDone   SyncNotifyFunc
 
 	mu           sync.RWMutex
 	commitHash   string
@@ -38,6 +52,14 @@ type Operator struct {
 	lastSync     time.Time
 	components   []*ComponentResult
 	driftInfo    map[string]*DriftInfo // component name -> drift state
+
+	waitersMu sync.Mutex
+	waiters   []syncWaiter
+}
+
+type syncWaiter struct {
+	ch         chan SyncResult
+	progressFn ProgressFunc
 }
 
 // NewOperator creates a new GitOps operator.
@@ -48,6 +70,83 @@ func NewOperator(repo *Repo, role string) *Operator {
 		pollInterval: DefaultPollInterval,
 		syncStatus:   "pending",
 		triggerCh:    make(chan struct{}, 1),
+	}
+}
+
+// SetSyncCallback registers a function called after every sync cycle.
+func (o *Operator) SetSyncCallback(fn SyncNotifyFunc) {
+	o.onSyncDone = fn
+}
+
+// TriggerSyncWait triggers an immediate sync and blocks until it completes.
+// If progressFn is provided, real-time output from git and docker compose
+// commands is streamed to it.
+func (o *Operator) TriggerSyncWait(ctx context.Context, progressFn ...ProgressFunc) (SyncResult, error) {
+	ch := make(chan SyncResult, 1)
+	w := syncWaiter{ch: ch}
+	if len(progressFn) > 0 {
+		w.progressFn = progressFn[0]
+	}
+	o.waitersMu.Lock()
+	o.waiters = append(o.waiters, w)
+	o.waitersMu.Unlock()
+
+	o.TriggerSync()
+
+	select {
+	case result := <-ch:
+		return result, nil
+	case <-ctx.Done():
+		// Remove our waiter to avoid leaking
+		o.waitersMu.Lock()
+		for i, ww := range o.waiters {
+			if ww.ch == ch {
+				o.waiters = append(o.waiters[:i], o.waiters[i+1:]...)
+				break
+			}
+		}
+		o.waitersMu.Unlock()
+		return SyncResult{}, ctx.Err()
+	}
+}
+
+// notifySyncDone sends the result to the callback and all waiters.
+func (o *Operator) notifySyncDone(result SyncResult) {
+	if o.onSyncDone != nil {
+		o.onSyncDone(result)
+	}
+	o.waitersMu.Lock()
+	waiters := o.waiters
+	o.waiters = nil
+	o.waitersMu.Unlock()
+	for _, w := range waiters {
+		w.ch <- result
+		close(w.ch)
+	}
+}
+
+// collectProgressFn returns a ProgressFunc that broadcasts to all current
+// waiters that have a progressFn. Returns nil if none do.
+func (o *Operator) collectProgressFn() ProgressFunc {
+	o.waitersMu.Lock()
+	var fns []ProgressFunc
+	for _, w := range o.waiters {
+		if w.progressFn != nil {
+			fns = append(fns, w.progressFn)
+		}
+	}
+	o.waitersMu.Unlock()
+
+	if len(fns) == 0 {
+		return nil
+	}
+	if len(fns) == 1 {
+		return fns[0]
+	}
+	return func(line string) {
+		for _, fn := range fns {
+			fn(line)
+		}
 	}
 }
 
@@ -106,29 +205,46 @@ func (o *Operator) Run(ctx context.Context) error {
 			slog.Info("gitops operator stopping")
 			return ctx.Err()
 		case <-ticker.C:
-			o.pollAndApply(ctx)
+			o.pollAndApply(ctx, nil)
 		case <-o.triggerCh:
 			slog.Info("running triggered sync")
-			o.pollAndApply(ctx)
+			pf := o.collectProgressFn()
+			o.pollAndApply(ctx, pf)
 		}
 	}
 }
 
 // pollAndApply checks for repo changes and applies if updated.
 // Detects orphaned components (removed from Git) and stops them.
-func (o *Operator) pollAndApply(ctx context.Context) {
+// progressFn, if non-nil, receives real-time output from every command.
+func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
+	start := time.Now()
 	o.setStatus("syncing", "")
+
+	emit := func(line string) {
+		if progressFn != nil {
+			progressFn(line)
+		}
+	}
+
+	result := SyncResult{}
 
 	// Phase 1: Record component names before pull
 	oldNames := o.repo.ComponentDirNames(o.role)
 
 	// Phase 2: Pull
-	updated, err := o.repo.Pull()
+	emit("--- git pull ---")
+	updated, err := o.repo.Pull(progressFn)
 	if err != nil {
 		o.setStatus("error", fmt.Sprintf("pull failed: %s", err))
 		slog.Error("git pull failed", "error", err)
+		result.Error = fmt.Sprintf("pull failed: %s", err)
+		result.DurationMs = time.Since(start).Milliseconds()
+		emit(fmt.Sprintf("FAILED: %s", err))
+		o.notifySyncDone(result)
 		return
 	}
+	result.Updated = updated
 
 	hash, err := o.repo.CommitHash()
 	if err != nil {
@@ -137,6 +253,7 @@ func (o *Operator) pollAndApply(ctx context.Context) {
 		o.mu.Lock()
 		o.commitHash = hash
 		o.mu.Unlock()
+		result.CommitHash = hash
 	}
 
 	// Phase 3: Record component names after pull
@@ -150,7 +267,8 @@ func (o *Operator) pollAndApply(ctx context.Context) {
 	for _, name := range oldNames {
 		if !newSet[name] {
 			slog.Info("component removed from repo, stopping", "name", name, "role", o.role)
-			if err := StopComponentByProject(ctx, name); err != nil {
+			emit(fmt.Sprintf("--- removing orphaned component: %s ---", name))
+			if err := StopComponentByProject(ctx, name, progressFn); err != nil {
 				slog.Error("failed to stop orphaned component", "name", name, "error", err)
 			}
 		}
@@ -159,31 +277,53 @@ func (o *Operator) pollAndApply(ctx context.Context) {
 	// Phase 5: Apply current components if repo changed
 	if updated {
 		slog.Info("repo changed, applying", "commit", hash[:8])
-		if err := o.applyAll(ctx); err != nil {
+		emit(fmt.Sprintf("--- applying components (commit %s) ---", hash[:8]))
+		if err := o.applyAll(ctx, progressFn); err != nil {
 			slog.Error("apply after pull failed", "error", err)
+			result.Error = fmt.Sprintf("apply failed: %s", err)
+			result.DurationMs = time.Since(start).Milliseconds()
+			o.mu.RLock()
+			result.Components = o.components
+			o.mu.RUnlock()
+			o.notifySyncDone(result)
 			return
 		}
+	} else {
+		emit("No changes, skipping apply")
 	}
 
 	// Phase 6: Drift detection. Check all components are actually running,
 	// regardless of whether git changed. Auto-remediate drifted components.
-	o.checkAndRemediateDrift(ctx)
+	emit("--- drift check ---")
+	o.checkAndRemediateDrift(ctx, progressFn)
 
 	o.setStatus("synced", "")
 	o.mu.Lock()
 	o.lastSync = time.Now()
+	result.Components = o.components
+	result.DriftInfo = o.driftInfo
 	o.mu.Unlock()
+
+	result.DurationMs = time.Since(start).Milliseconds()
+	emit(fmt.Sprintf("Sync complete in %dms", result.DurationMs))
+	o.notifySyncDone(result)
 }
 
 // checkAndRemediateDrift checks if any expected containers are not running
 // and re-applies their compose files to restore them.
-func (o *Operator) checkAndRemediateDrift(ctx context.Context) {
+func (o *Operator) checkAndRemediateDrift(ctx context.Context, progressFn ProgressFunc) {
 	dirs, err := o.repo.ComponentDirs(o.role)
 	if err != nil {
 		slog.Debug("drift check: cannot list component dirs", "error", err)
 		return
 	}
 	driftMap := make(map[string]*DriftInfo, len(dirs))
+
+	emit := func(line string) {
+		if progressFn != nil {
+			progressFn(line)
+		}
+	}
 
 	for _, dir := range dirs {
 		info, err := DriftCheck(ctx, dir)
@@ -200,13 +340,17 @@ func (o *Operator) checkAndRemediateDrift(ctx context.Context) {
 				"containers", info.ContainerCount,
 				"running", info.RunningCount,
 			)
+			emit(fmt.Sprintf("[%s] DRIFT: %d/%d containers running, re-applying", info.Name, info.RunningCount, info.ContainerCount))
 			ClearHashForDir(dir)
-			result := ApplyComponent(ctx, dir)
+			result := ApplyComponent(ctx, dir, progressFn)
 			if result.Status == "error" {
 				slog.Error("drift remediation failed", "component", info.Name, "error", result.Error)
 			} else {
 				slog.Info("drift remediated", "component", info.Name)
+				emit(fmt.Sprintf("[%s] drift remediated", info.Name))
 			}
+		} else {
+			emit(fmt.Sprintf("[%s] OK (%d/%d running)", info.Name, info.RunningCount, info.ContainerCount))
 		}
 	}
 
@@ -216,7 +360,12 @@ func (o *Operator) checkAndRemediateDrift(ctx context.Context) {
 }
 
 // applyAll discovers and applies all component directories for the server role.
-func (o *Operator) applyAll(ctx context.Context) error {
+func (o *Operator) applyAll(ctx context.Context, progressFn ...ProgressFunc) error {
+	var pf ProgressFunc
+	if len(progressFn) > 0 {
+		pf = progressFn[0]
+	}
+
 	dirs, err := o.repo.ComponentDirs(o.role)
 	if err != nil {
 		o.setStatus("error", fmt.Sprintf("component discovery: %s", err))
@@ -233,7 +382,7 @@ func (o *Operator) applyAll(ctx context.Context) error {
 	o.injectSecrets(dirs)
 
 	slog.Info("applying components", "count", len(dirs), "role", o.role)
-	results := ApplyAll(ctx, dirs)
+	results := ApplyAll(ctx, dirs, pf)
 
 	// Check for errors
 	var errCount int

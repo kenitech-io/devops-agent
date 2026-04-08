@@ -18,6 +18,7 @@ const (
 	TypeConfigBackup    = "config_backup"
 	TypeAgentGoodbye    = "agent_goodbye"
 	TypeUpdateProgress  = "update_progress"
+	TypeGitSync         = "git_sync"
 	TypePong            = "pong"
 	TypeError           = "error"
 )
@@ -197,6 +198,23 @@ type ConfigUpdatePayload struct {
 	DashboardURL string `json:"dashboardUrl,omitempty"`
 	Environment  string `json:"environment,omitempty"`
 	RestartAfter bool   `json:"restartAfter"`
+}
+
+// GitSyncComponent describes one IDP component's state after a sync.
+type GitSyncComponent struct {
+	Name           string `json:"name"`
+	Role           string `json:"role"`
+	Running        bool   `json:"running"`
+	ContainerCount int    `json:"containerCount"`
+}
+
+// GitSyncPayload is sent after each sync cycle completes.
+// The dashboard uses this to update drift status and activity logs.
+type GitSyncPayload struct {
+	CommitSha  string             `json:"commitSha"`
+	LastPullAt string             `json:"lastPullAt"`
+	Components []GitSyncComponent `json:"components"`
+	Error      string             `json:"error,omitempty"`
 }
 
 // NewMessage creates a new message with a generated ID and current timestamp.

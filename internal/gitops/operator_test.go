@@ -247,7 +247,7 @@ func TestOperator_pollAndApply_PullError(t *testing.T) {
 	os.RemoveAll(remoteDir)
 
 	op := NewOperator(repo, "CORE")
-	op.pollAndApply(context.Background())
+	op.pollAndApply(context.Background(), nil)
 
 	status := op.Status()
 	if status.SyncStatus != "error" {

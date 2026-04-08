@@ -203,6 +203,13 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 	}
 	client = ws.NewClient(cfg.WSEndpoint, cfg.AgentID, cfg.WSToken, handler)
 
+	// Send git_sync message to dashboard after every sync cycle.
+	if gitopsOp != nil {
+		gitopsOp.SetSyncCallback(func(result gitops.SyncResult) {
+			sendGitSyncReport(client, serverRole, result)
+		})
+	}
+
 	// Expose the client to the signal handler for goodbye messages.
 	wsClientMu.Lock()
 	*wsClientPtr = client
@@ -305,6 +312,39 @@ func sendStatusReport(client *ws.Client, gitopsOp *gitops.Operator) {
 		slog.Warn("sending status report", "error", err)
 	} else {
 		metrics.StatusReportsSent.Inc()
+	}
+}
+
+func sendGitSyncReport(client *ws.Client, role string, result gitops.SyncResult) {
+	payload := ws.GitSyncPayload{
+		CommitSha:  result.CommitHash,
+		LastPullAt: time.Now().UTC().Format(time.RFC3339),
+		Error:      result.Error,
+	}
+
+	for _, c := range result.Components {
+		running := c.Status == "running"
+		containerCount := 0
+		if di, ok := result.DriftInfo[c.Name]; ok {
+			containerCount = di.ContainerCount
+		}
+		payload.Components = append(payload.Components, ws.GitSyncComponent{
+			Name:           c.Name,
+			Role:           role,
+			Running:        running,
+			ContainerCount: containerCount,
+		})
+	}
+
+	msg, err := ws.NewMessage(ws.TypeGitSync, payload)
+	if err != nil {
+		slog.Error("creating git_sync message", "error", err)
+		return
+	}
+	if err := client.Send(msg); err != nil {
+		slog.Warn("sending git_sync message", "error", err)
+	} else {
+		slog.Info("sent git_sync report", "commit", result.CommitHash[:min(8, len(result.CommitHash))], "error", result.Error)
 	}
 }
 
@@ -433,20 +473,49 @@ func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Messag
 
 	slog.Info("executing command", "action", req.Action, "request_id", msg.ID)
 
-	// gitops_sync is handled specially: triggers the operator directly, no mutex needed
+	// gitops_sync: trigger operator and stream progress until complete (no mutex needed)
 	if req.Action == "gitops_sync" {
 		if gitopsOp == nil {
 			sendError(client, "EXECUTION_FAILED", "gitops operator not running", msg.ID)
 			return
 		}
-		gitopsOp.TriggerSync()
-		resultMsg, _ := ws.NewMessage(ws.TypeCommandResult, ws.CommandResultPayload{
+
+		sendStream := func(line string) {
+			streamMsg, _ := ws.NewMessage(ws.TypeCommandStream, ws.CommandStreamPayload{
+				RequestID: msg.ID,
+				Stream:    "stdout",
+				Line:      line,
+			})
+			client.Send(streamMsg)
+		}
+
+		syncTimeout := 120 * time.Second
+		syncCtx, syncCancel := context.WithTimeout(context.WithoutCancel(ctx), syncTimeout)
+		defer syncCancel()
+
+		result, err := gitopsOp.TriggerSyncWait(syncCtx, sendStream)
+		if err != nil {
+			sendStream(fmt.Sprintf("Sync failed: %s", err))
+			completeMsg, _ := ws.NewMessage(ws.TypeCommandComplete, ws.CommandCompletePayload{
+				RequestID:  msg.ID,
+				ExitCode:   1,
+				DurationMs: 0,
+			})
+			client.Send(completeMsg)
+			return
+		}
+
+		exitCode := 0
+		if result.Error != "" {
+			exitCode = 1
+		}
+
+		completeMsg, _ := ws.NewMessage(ws.TypeCommandComplete, ws.CommandCompletePayload{
 			RequestID:  msg.ID,
-			ExitCode:   0,
-			Stdout:     "sync triggered",
-			DurationMs: 0,
+			ExitCode:   exitCode,
+			DurationMs: result.DurationMs,
 		})
-		client.Send(resultMsg)
+		client.Send(completeMsg)
 		return
 	}
 
