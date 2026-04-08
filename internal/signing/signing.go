@@ -9,7 +9,7 @@ import (
 // ReleasePublicKey is the ed25519 public key used to verify release signatures.
 // This key is paired with the private key stored in GitHub Secrets (RELEASE_SIGNING_KEY).
 // Generate a new key pair with: go run ./cmd/generate-signing-key
-var ReleasePublicKey = "jj7COJTzPKA5ZNjFqczqLS6cfDWC3YU8R4dpNY3x2Bo="
+var ReleasePublicKey = "9RFDOEVhPakur8ZSc89qphz7a3LLJAAE29oV6kPDIYs="
 
 // VerifyChecksum verifies that the checksum string was signed with the release key.
 // The signature is base64-encoded ed25519 signature over the checksum bytes.
