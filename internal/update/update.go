@@ -509,7 +509,20 @@ func waitForHealthy(url string, timeout, interval time.Duration) error {
 }
 
 func restartSystemd() error {
-	out, err := exec.Command("systemctl", "restart", "keni-agent").CombinedOutput()
+	// Use systemd-run to schedule the restart in a transient unit outside the
+	// agent's own cgroup. Without this, systemd kills every process in the
+	// keni-agent.service cgroup (including a child "systemctl restart") when
+	// stopping the service, causing CombinedOutput to return "signal: terminated".
+
+	// Clean up any lingering transient unit from a previous attempt.
+	exec.Command("systemctl", "reset-failed", "keni-agent-restart").Run()
+
+	out, err := exec.Command(
+		"systemd-run", "--no-block",
+		"--unit=keni-agent-restart",
+		"--description=Keni Agent self-update restart",
+		"systemctl", "restart", "keni-agent",
+	).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, string(out))
 	}
