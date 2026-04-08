@@ -268,40 +268,23 @@ func UpdateWithProgress(downloadURL, expectedChecksum string, progress ProgressF
 	}
 	report("Replacing binary", "done", "")
 
+	// Remove the marker BEFORE restart. The binary replacement is complete,
+	// so checkUpdateRecovery on the new binary should NOT rollback.
+	// The .prev backup stays for manual rollback if needed.
+	os.Remove(markerPath)
+
 	slog.Info("binary replaced, restarting via systemd")
 	report("Restarting service", "running", "")
 
 	if err := restartFunc(); err != nil {
-		slog.Error("restart failed, rolling back", "error", err)
-		if rollbackErr := rollback(prevPath, currentPath); rollbackErr != nil {
-			slog.Error("rollback failed", "error", rollbackErr)
-		}
-		os.Remove(markerPath)
-		report("Restarting service", "error", err.Error())
-		return fmt.Errorf("restarting service: %w", err)
+		// The restart was initiated even if the monitoring process got killed
+		// (e.g. "signal: terminated" when systemd kills our cgroup).
+		// Do NOT rollback: the new binary is verified and in place.
+		slog.Warn("restart returned error (expected during self-update)", "error", err)
+		report("Restarting service", "done", "Agent will reconnect with new version")
+		return nil
 	}
 	report("Restarting service", "done", "Agent will reconnect with new version")
-
-	restartFn := restartFunc
-	healthURL := HealthCheckURL
-	healthTimeout := HealthCheckTimeout
-	healthInterval := HealthCheckInterval
-	markerForGoroutine := markerPath
-	go func() {
-		if err := waitForHealthy(healthURL, healthTimeout, healthInterval); err != nil {
-			slog.Error("post-update health check failed, rolling back", "error", err)
-			if rollbackErr := rollback(prevPath, currentPath); rollbackErr != nil {
-				slog.Error("rollback after health check failure failed", "error", rollbackErr)
-				return
-			}
-			os.Remove(markerForGoroutine)
-			restartFn()
-		} else {
-			slog.Info("post-update health check passed, removing backup")
-			os.Remove(prevPath)
-			os.Remove(markerForGoroutine)
-		}
-	}()
 
 	return nil
 }

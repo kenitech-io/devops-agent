@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"sync/atomic"
+
 	"testing"
 	"time"
 )
@@ -834,9 +834,9 @@ func TestUpdate_DownloadFailure(t *testing.T) {
 	}
 }
 
-func TestUpdate_HealthCheckFailureTriggersRollback(t *testing.T) {
+func TestUpdate_RestartErrorDoesNotRollback(t *testing.T) {
 	t.Setenv("KENI_SKIP_WIREGUARD", "true")
-	newContent := []byte("new binary for health test")
+	newContent := []byte("new binary for restart error test")
 	hash := sha256.Sum256(newContent)
 	checksum := "sha256:" + hex.EncodeToString(hash[:])
 
@@ -845,45 +845,27 @@ func TestUpdate_HealthCheckFailureTriggersRollback(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Health check always fails
-	healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer healthServer.Close()
+	currentPath, cleanup := setupUpdateTest(t, "old binary", 0)
+	defer cleanup()
 
-	currentPath, cleanup := setupUpdateTest(t, "old binary for health", 0)
-	HealthCheckURL = healthServer.URL
-	HealthCheckTimeout = 200 * time.Millisecond
-	HealthCheckInterval = 50 * time.Millisecond
-
-	var restartCalled atomic.Int32
+	// Simulate "signal: terminated" error during restart (expected during self-update)
 	restartFunc = func() error {
-		restartCalled.Add(1)
-		return nil
+		return fmt.Errorf("signal: terminated")
 	}
 
 	err := Update(server.URL, checksum)
 	if err != nil {
-		cleanup()
-		t.Fatalf("Update() error: %v", err)
+		t.Fatalf("Update() should succeed even with restart error, got: %v", err)
 	}
 
-	// Wait for background goroutine to complete rollback, then restore globals
-	time.Sleep(800 * time.Millisecond)
-	cleanup()
-
-	// The background goroutine should have rolled back
+	// New binary should stay in place (no rollback)
 	data, _ := os.ReadFile(currentPath)
-	if string(data) != "old binary for health" {
-		t.Logf("binary content after rollback: %q (rollback may have happened)", data)
-	}
-	// restartFunc should have been called at least twice (initial + rollback)
-	if restartCalled.Load() < 2 {
-		t.Errorf("expected restart to be called at least 2 times, got %d", restartCalled.Load())
+	if string(data) != string(newContent) {
+		t.Errorf("expected new binary to stay, got %q", data)
 	}
 }
 
-func TestUpdate_RestartFailure(t *testing.T) {
+func TestUpdate_RestartFailureKeepsNewBinary(t *testing.T) {
 	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 	newContent := []byte("new binary for restart test")
 	hash := sha256.Sum256(newContent)
@@ -902,14 +884,14 @@ func TestUpdate_RestartFailure(t *testing.T) {
 	}
 
 	err := Update(server.URL, checksum)
-	if err == nil {
-		t.Fatal("expected restart error")
+	if err != nil {
+		t.Fatalf("Update() should succeed even with restart error, got: %v", err)
 	}
 
-	// After restart failure, rollback should restore the old binary
+	// New binary should stay in place (restart errors don't trigger rollback)
 	data, _ := os.ReadFile(currentPath)
-	if string(data) != "old binary" {
-		t.Errorf("expected rollback to restore old binary, got %q", data)
+	if string(data) != string(newContent) {
+		t.Errorf("expected new binary to stay, got %q", data)
 	}
 }
 
@@ -1154,7 +1136,7 @@ func TestDownloadBinary_DestPathInvalid(t *testing.T) {
 	}
 }
 
-func TestUpdate_MarkerFileCreatedAndRemovedOnSuccess(t *testing.T) {
+func TestUpdate_MarkerFileRemovedBeforeRestart(t *testing.T) {
 	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 
 	newContent := []byte("new binary for marker test")
@@ -1166,26 +1148,29 @@ func TestUpdate_MarkerFileCreatedAndRemovedOnSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer healthServer.Close()
-
 	currentPath, cleanup := setupUpdateTest(t, "old binary", 0)
-	HealthCheckURL = healthServer.URL
+	defer cleanup()
 	markerFile := markerPathOverride
+
+	// Verify marker is removed before restart by checking inside restartFunc
+	var markerExistsDuringRestart bool
+	restartFunc = func() error {
+		_, err := os.Stat(markerFile)
+		markerExistsDuringRestart = err == nil
+		return nil
+	}
 
 	err := Update(server.URL, checksum)
 	if err != nil {
-		cleanup()
 		t.Fatalf("Update() error: %v", err)
 	}
 
-	// Wait for background goroutine to finish
-	time.Sleep(800 * time.Millisecond)
-	cleanup()
+	// Marker should have been removed BEFORE restart was called
+	if markerExistsDuringRestart {
+		t.Error("marker file should be removed before restart, but it still existed")
+	}
 
-	// Marker file should be removed after successful health check
+	// Marker should not exist after update
 	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
 		t.Error("marker file should be removed after successful update")
 	}
@@ -1197,7 +1182,7 @@ func TestUpdate_MarkerFileCreatedAndRemovedOnSuccess(t *testing.T) {
 	}
 }
 
-func TestUpdate_MarkerFileRemovedOnRestartFailure(t *testing.T) {
+func TestUpdate_MarkerFileRemovedBeforeRestartEvenOnError(t *testing.T) {
 	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 
 	newContent := []byte("new binary for restart fail marker test")
@@ -1218,20 +1203,20 @@ func TestUpdate_MarkerFileRemovedOnRestartFailure(t *testing.T) {
 	}
 
 	err := Update(server.URL, checksum)
-	if err == nil {
-		t.Fatal("expected restart error")
+	if err != nil {
+		t.Fatalf("Update() should succeed even with restart error, got: %v", err)
 	}
 
-	// Marker file should be removed after restart failure rollback
+	// Marker file should be removed (it was removed before restart)
 	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
-		t.Error("marker file should be removed after restart failure")
+		t.Error("marker file should be removed before restart")
 	}
 }
 
-func TestUpdate_MarkerFileRemovedOnHealthCheckFailure(t *testing.T) {
+func TestUpdate_BackupFileLeftForManualRollback(t *testing.T) {
 	t.Setenv("KENI_SKIP_WIREGUARD", "true")
 
-	newContent := []byte("new binary for health fail marker test")
+	newContent := []byte("new binary for backup test")
 	hash := sha256.Sum256(newContent)
 	checksum := "sha256:" + hex.EncodeToString(hash[:])
 
@@ -1240,31 +1225,19 @@ func TestUpdate_MarkerFileRemovedOnHealthCheckFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer healthServer.Close()
-
-	_, cleanup := setupUpdateTest(t, "old binary", 0)
-	HealthCheckURL = healthServer.URL
-	HealthCheckTimeout = 200 * time.Millisecond
-	HealthCheckInterval = 50 * time.Millisecond
-	markerFile := markerPathOverride
+	currentPath, cleanup := setupUpdateTest(t, "old binary", 0)
+	defer cleanup()
 
 	restartFunc = func() error { return nil }
 
 	err := Update(server.URL, checksum)
 	if err != nil {
-		cleanup()
 		t.Fatalf("Update() error: %v", err)
 	}
 
-	// Wait for background goroutine to complete rollback
-	time.Sleep(800 * time.Millisecond)
-	cleanup()
-
-	// Marker file should be removed after health check failure rollback
-	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
-		t.Error("marker file should be removed after health check failure rollback")
+	// .prev backup should exist for manual rollback / startup cleanup
+	prevPath := currentPath + ".prev"
+	if _, err := os.Stat(prevPath); os.IsNotExist(err) {
+		t.Error(".prev backup should exist after update for startup cleanup")
 	}
 }

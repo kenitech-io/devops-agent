@@ -29,9 +29,11 @@ import (
 
 var version = "dev"
 
-// checkUpdateRecovery detects incomplete self-updates by looking for a .prev
-// binary alongside an update-in-progress marker file. If both exist, the
-// previous update crashed before completing: restore the old binary and re-exec.
+// checkUpdateRecovery handles leftover files from self-updates.
+//
+// Marker + .prev = update crashed during binary replacement: rollback.
+// .prev only (no marker) = update completed successfully, binary was replaced
+// and restart happened: just clean up the stale backup.
 func checkUpdateRecovery() {
 	currentPath, err := os.Executable()
 	if err != nil {
@@ -42,32 +44,46 @@ func checkUpdateRecovery() {
 	prevPath := currentPath + ".prev"
 	markerPath := update.UpdateMarkerPath
 
-	// Both files must exist to trigger recovery
-	if _, err := os.Stat(prevPath); os.IsNotExist(err) {
-		return
+	hasPrev := false
+	if _, err := os.Stat(prevPath); err == nil {
+		hasPrev = true
 	}
-	if _, err := os.Stat(markerPath); os.IsNotExist(err) {
-		return
+	hasMarker := false
+	if _, err := os.Stat(markerPath); err == nil {
+		hasMarker = true
 	}
 
-	slog.Warn("detected incomplete update, rolling back to previous binary",
-		"current", currentPath, "prev", prevPath)
-
-	// Restore the previous binary over the current one
-	if err := os.Rename(prevPath, currentPath); err != nil {
-		slog.Error("rollback rename failed", "error", err)
+	if !hasPrev && !hasMarker {
 		return
 	}
 
-	// Remove the marker so the restored binary does not loop
-	os.Remove(markerPath)
+	if hasMarker && hasPrev {
+		// Incomplete update: crashed during binary replacement. Rollback.
+		slog.Warn("detected incomplete update, rolling back to previous binary",
+			"current", currentPath, "prev", prevPath)
 
-	slog.Info("rollback complete, re-executing restored binary")
+		if err := os.Rename(prevPath, currentPath); err != nil {
+			slog.Error("rollback rename failed", "error", err)
+			return
+		}
+		os.Remove(markerPath)
 
-	// Re-exec the restored binary with the same arguments
-	if err := syscall.Exec(currentPath, os.Args, os.Environ()); err != nil {
-		slog.Error("re-exec after rollback failed", "error", err)
-		os.Exit(1)
+		slog.Info("rollback complete, re-executing restored binary")
+		if err := syscall.Exec(currentPath, os.Args, os.Environ()); err != nil {
+			slog.Error("re-exec after rollback failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Clean up stale files from a completed update
+	if hasPrev {
+		slog.Info("cleaning up stale backup from completed update", "prev", prevPath)
+		os.Remove(prevPath)
+	}
+	if hasMarker {
+		slog.Info("cleaning up stale marker file", "marker", markerPath)
+		os.Remove(markerPath)
 	}
 }
 
@@ -144,71 +160,103 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 	var cmdMu sync.Mutex
 	var cmdWg sync.WaitGroup
 
-	// Start GitOps operator if configured.
+	// GitOps operator: may be started at boot or later via config_update.
 	var gitopsOp *gitops.Operator
-	repoURL := cfg.GetRepoURL()
-	serverRole := cfg.GetServerRole()
+	var gitopsMu sync.Mutex // protects gitopsOp pointer
 
-	// If no repo URL in config, try fetching from dashboard
-	if repoURL == "" && cfg.DashboardURL != "" && cfg.AgentID != "" && cfg.WSToken != "" {
-		slog.Info("no repo URL in config, fetching from dashboard")
-		gitTokenResp, err := secrets.FetchGitToken(cfg.DashboardURL, cfg.AgentID, cfg.WSToken)
-		if err != nil {
-			slog.Warn("could not fetch git config from dashboard", "error", err)
-		} else if gitTokenResp.RepoURL != "" {
-			repoURL = gitTokenResp.RepoURL
-			cfg.RepoURL = repoURL
-			if saveErr := cfg.Save(); saveErr != nil {
-				slog.Warn("could not save repo URL to config", "error", saveErr)
-			}
-			slog.Info("fetched repo URL from dashboard", "url", repoURL)
+	// startGitOpsOperator creates and starts the operator if repo URL and role are available.
+	// Safe to call multiple times: no-op if already running.
+	startGitOpsOperator := func(client *ws.Client) {
+		gitopsMu.Lock()
+		defer gitopsMu.Unlock()
+
+		if gitopsOp != nil {
+			return // already running
 		}
-	}
 
-	if repoURL != "" && serverRole != "" {
+		repoURL := cfg.GetRepoURL()
+		serverRole := cfg.GetServerRole()
+
+		// Try fetching repo URL from dashboard if not in config
+		if repoURL == "" && cfg.DashboardURL != "" && cfg.AgentID != "" && cfg.WSToken != "" {
+			slog.Info("no repo URL in config, fetching from dashboard")
+			gitTokenResp, err := secrets.FetchGitToken(cfg.DashboardURL, cfg.AgentID, cfg.WSToken)
+			if err != nil {
+				slog.Warn("could not fetch git config from dashboard", "error", err)
+			} else if gitTokenResp.RepoURL != "" {
+				repoURL = gitTokenResp.RepoURL
+				cfg.RepoURL = repoURL
+				if saveErr := cfg.Save(); saveErr != nil {
+					slog.Warn("could not save repo URL to config", "error", saveErr)
+				}
+				slog.Info("fetched repo URL from dashboard", "url", repoURL)
+			}
+		}
+
+		if repoURL == "" || serverRole == "" {
+			slog.Info("gitops operator not started (missing repo URL or server role)",
+				"has_repo", repoURL != "", "has_role", serverRole != "")
+			return
+		}
+
 		repo, err := gitops.NewRepo(repoURL, cfg.GetDeployToken(), config.GitOpsDataDir)
 		if err != nil {
 			slog.Error("invalid gitops repo config", "error", err)
-		} else {
-			// Set token func to fetch fresh installation tokens from dashboard
-			if cfg.DashboardURL != "" && cfg.AgentID != "" && cfg.WSToken != "" {
-				repo.SetTokenFunc(func() (string, error) {
-					resp, err := secrets.FetchGitToken(cfg.DashboardURL, cfg.AgentID, cfg.WSToken)
-					if err != nil {
-						return "", err
-					}
-					return resp.Token, nil
-				})
-			}
-			gitopsOp = gitops.NewOperator(repo, serverRole)
-			gitopsOp.SetSecretsConfig(&gitops.SecretsConfig{
-				DashboardURL: cfg.DashboardURL,
-				AgentID:      cfg.AgentID,
-				WSToken:      cfg.WSToken,
-			})
-			go func() {
-				if err := gitopsOp.Run(ctx); err != nil && ctx.Err() == nil {
-					slog.Error("gitops operator exited", "error", err)
-				}
-			}()
-			slog.Info("gitops operator started", "repo", repoURL, "role", serverRole)
+			return
 		}
-	} else {
-		slog.Info("gitops operator disabled (no repo URL or server role configured)")
+
+		// Set token func to fetch fresh installation tokens from dashboard
+		if cfg.DashboardURL != "" && cfg.AgentID != "" && cfg.WSToken != "" {
+			repo.SetTokenFunc(func() (string, error) {
+				resp, err := secrets.FetchGitToken(cfg.DashboardURL, cfg.AgentID, cfg.WSToken)
+				if err != nil {
+					return "", err
+				}
+				return resp.Token, nil
+			})
+		}
+
+		gitopsOp = gitops.NewOperator(repo, serverRole)
+		gitopsOp.SetSecretsConfig(&gitops.SecretsConfig{
+			DashboardURL: cfg.DashboardURL,
+			AgentID:      cfg.AgentID,
+			WSToken:      cfg.WSToken,
+		})
+
+		// Register sync callback to report results to dashboard
+		if client != nil {
+			gitopsOp.SetSyncCallback(func(result gitops.SyncResult) {
+				sendGitSyncReport(client, serverRole, result)
+			})
+		}
+
+		go func() {
+			if err := gitopsOp.Run(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("gitops operator exited", "error", err)
+			}
+		}()
+		slog.Info("gitops operator started", "repo", repoURL, "role", serverRole)
 	}
+
+	// getGitOpsOp returns the current operator (thread-safe).
+	getGitOpsOp := func() *gitops.Operator {
+		gitopsMu.Lock()
+		defer gitopsMu.Unlock()
+		return gitopsOp
+	}
+
+	// Try starting operator at boot
+	startGitOpsOperator(nil)
 
 	var client *ws.Client
 	handler := func(msg *ws.Message) {
-		handleDashboardMessage(ctx, client, cfg, msg, &cmdMu, &cmdWg, gitopsOp)
+		handleDashboardMessage(ctx, client, cfg, msg, &cmdMu, &cmdWg, getGitOpsOp, startGitOpsOperator)
 	}
 	client = ws.NewClient(cfg.WSEndpoint, cfg.AgentID, cfg.WSToken, handler)
 
-	// Send git_sync message to dashboard after every sync cycle.
-	if gitopsOp != nil {
-		gitopsOp.SetSyncCallback(func(result gitops.SyncResult) {
-			sendGitSyncReport(client, serverRole, result)
-		})
-	}
+	// Re-register sync callback now that client is available, and retry operator start
+	// in case it failed at boot due to missing repo URL (now we can fetch it).
+	startGitOpsOperator(client)
 
 	// Expose the client to the signal handler for goodbye messages.
 	wsClientMu.Lock()
@@ -230,10 +278,11 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 	go collector.WatchDockerEvents(ctx, func(event collector.DockerEvent) {
 		slog.Info("container event detected, sending immediate status report",
 			"action", event.Action, "container", event.ContainerName())
-		sendStatusReport(client, gitopsOp)
+		op := getGitOpsOp()
+		sendStatusReport(client, op)
 		// Trigger drift check so the operator can remediate
-		if gitopsOp != nil {
-			gitopsOp.TriggerSync()
+		if op != nil {
+			op.TriggerSync()
 		}
 	})
 
@@ -257,13 +306,13 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		time.Sleep(5 * time.Second)
-		sendStatusReport(client, gitopsOp)
+		sendStatusReport(client, getGitOpsOp())
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				sendStatusReport(client, gitopsOp)
+				sendStatusReport(client, getGitOpsOp())
 			}
 		}
 	}()
@@ -397,7 +446,7 @@ func sendConfigBackup(client *ws.Client, cfg *config.Config) {
 	}
 }
 
-func handleConfigUpdate(cfg *config.Config, msg *ws.Message, gitopsOp *gitops.Operator) {
+func handleConfigUpdate(cfg *config.Config, msg *ws.Message, gitopsOp *gitops.Operator, startGitOpsOp func(*ws.Client), client *ws.Client) {
 	var payload ws.ConfigUpdatePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		slog.Error("parsing config_update", "error", err)
@@ -431,10 +480,16 @@ func handleConfigUpdate(cfg *config.Config, msg *ws.Message, gitopsOp *gitops.Op
 		"environment_changed", envChanged,
 	)
 
-	// If environment changed, trigger a gitops sync to apply the new role's components.
-	if envChanged && gitopsOp != nil {
-		slog.Info("environment changed, triggering gitops sync", "new_environment", payload.Environment)
-		gitopsOp.TriggerSync()
+	// If environment changed, try to start operator (may have been nil before) and trigger sync.
+	if envChanged {
+		if gitopsOp != nil {
+			slog.Info("environment changed, triggering gitops sync", "new_environment", payload.Environment)
+			gitopsOp.TriggerSync()
+		} else {
+			// Operator was nil, try starting it now that we have a server role.
+			slog.Info("environment set, attempting to start gitops operator", "environment", payload.Environment)
+			startGitOpsOp(client)
+		}
 	}
 
 	if payload.RestartAfter {
@@ -447,7 +502,7 @@ func handleConfigUpdate(cfg *config.Config, msg *ws.Message, gitopsOp *gitops.Op
 	}
 }
 
-func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.Config, msg *ws.Message, cmdMu *sync.Mutex, cmdWg *sync.WaitGroup, gitopsOp *gitops.Operator) {
+func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.Config, msg *ws.Message, cmdMu *sync.Mutex, cmdWg *sync.WaitGroup, getGitOpsOp func() *gitops.Operator, startGitOpsOp func(*ws.Client)) {
 	switch msg.Type {
 	case ws.TypePing:
 		handlePing(client, msg)
@@ -455,10 +510,10 @@ func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.
 		cmdWg.Add(1)
 		go func() {
 			defer cmdWg.Done()
-			handleCommandRequest(ctx, client, msg, cmdMu, gitopsOp)
+			handleCommandRequest(ctx, client, msg, cmdMu, getGitOpsOp())
 		}()
 	case ws.TypeConfigUpdate:
-		handleConfigUpdate(cfg, msg, gitopsOp)
+		handleConfigUpdate(cfg, msg, getGitOpsOp(), startGitOpsOp, client)
 	case ws.TypeUpdateAvailable:
 		go handleUpdateAvailable(client, msg)
 	default:
