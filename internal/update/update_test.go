@@ -1,6 +1,9 @@
 package update
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -732,6 +735,66 @@ func TestUpdate_FullFlow(t *testing.T) {
 	cleanup()
 
 	// Verify the binary was replaced
+	data, _ := os.ReadFile(currentPath)
+	if string(data) != string(newContent) {
+		t.Errorf("expected binary content %q, got %q", newContent, data)
+	}
+}
+
+// TestUpdate_TarGzFlow verifies the full update path with a tar.gz archive:
+// download tar.gz, verify checksum of the archive (not the extracted binary),
+// extract the binary, replace, and restart.
+func TestUpdate_TarGzFlow(t *testing.T) {
+	t.Setenv("KENI_SKIP_WIREGUARD", "true")
+
+	// Build a tar.gz containing a "keni-agent" binary
+	newContent := []byte("new agent binary from tarball v3")
+	var archiveBuf bytes.Buffer
+	gw := gzip.NewWriter(&archiveBuf)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{
+		Name: "keni-agent",
+		Mode: 0755,
+		Size: int64(len(newContent)),
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(newContent); err != nil {
+		t.Fatal(err)
+	}
+	tw.Close()
+	gw.Close()
+
+	archiveBytes := archiveBuf.Bytes()
+	archiveHash := sha256.Sum256(archiveBytes)
+	checksum := "sha256:" + hex.EncodeToString(archiveHash[:])
+
+	// Serve the tar.gz on a path ending in .tar.gz so downloadFile triggers extraction
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(archiveBytes)
+	}))
+	defer server.Close()
+
+	healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer healthServer.Close()
+
+	currentPath, cleanup := setupUpdateTest(t, "old agent binary v1", 0)
+	HealthCheckURL = healthServer.URL
+
+	// Use a .tar.gz URL suffix to trigger the tar.gz code path
+	err := UpdateWithProgress(server.URL+"/keni-agent_1.9.4_linux_amd64.tar.gz", checksum, nil)
+	if err != nil {
+		cleanup()
+		t.Fatalf("UpdateWithProgress() with tar.gz error: %v", err)
+	}
+
+	time.Sleep(800 * time.Millisecond)
+	cleanup()
+
+	// Verify the binary was replaced with the extracted content
 	data, _ := os.ReadFile(currentPath)
 	if string(data) != string(newContent) {
 		t.Errorf("expected binary content %q, got %q", newContent, data)
