@@ -224,6 +224,19 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 		}
 	})
 
+	// Start Docker events listener for immediate reaction to container die/oom/kill.
+	// Triggers an immediate status report and gitops drift check instead of waiting
+	// for the next poll cycle.
+	go collector.WatchDockerEvents(ctx, func(event collector.DockerEvent) {
+		slog.Info("container event detected, sending immediate status report",
+			"action", event.Action, "container", event.ContainerName())
+		sendStatusReport(client, gitopsOp)
+		// Trigger drift check so the operator can remediate
+		if gitopsOp != nil {
+			gitopsOp.TriggerSync()
+		}
+	})
+
 	// Start heartbeat ticker (30s)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)

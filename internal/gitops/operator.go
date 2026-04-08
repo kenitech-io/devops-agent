@@ -13,6 +13,38 @@ import (
 	"github.com/kenitech-io/devops-agent/internal/ws"
 )
 
+// componentSnapshot stores compose file contents for rollback.
+type componentSnapshot struct {
+	files map[string]map[string][]byte // dir -> filename -> content
+}
+
+// snapshotComponents saves the compose files and .env for each component directory.
+func snapshotComponents(dirs []string) *componentSnapshot {
+	s := &componentSnapshot{files: make(map[string]map[string][]byte)}
+	for _, dir := range dirs {
+		s.files[dir] = make(map[string][]byte)
+		for _, name := range []string{"docker-compose.yml", ".env"} {
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err == nil {
+				s.files[dir][name] = data
+			}
+		}
+	}
+	return s
+}
+
+// restore writes the snapshotted files back to disk.
+func (s *componentSnapshot) restore() error {
+	for dir, files := range s.files {
+		for name, content := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), content, 0644); err != nil {
+				return fmt.Errorf("restoring %s/%s: %w", dir, name, err)
+			}
+		}
+	}
+	return nil
+}
+
 // DefaultPollInterval is the default interval between git pull checks.
 const DefaultPollInterval = 30 * time.Second
 
@@ -52,6 +84,12 @@ type Operator struct {
 	lastSync     time.Time
 	components   []*ComponentResult
 	driftInfo    map[string]*DriftInfo // component name -> drift state
+
+	// Rollback state: commit hash that failed health checks.
+	// When set, the operator skips applying this commit on subsequent polls.
+	badCommit string
+	// Snapshot of compose files before the last pull, used for rollback.
+	snapshot *componentSnapshot
 
 	waitersMu sync.Mutex
 	waiters   []syncWaiter
@@ -216,6 +254,8 @@ func (o *Operator) Run(ctx context.Context) error {
 
 // pollAndApply checks for repo changes and applies if updated.
 // Detects orphaned components (removed from Git) and stops them.
+// After applying a new commit, verifies container health. If health fails,
+// restores the previous compose files and re-applies (rollback).
 // progressFn, if non-nil, receives real-time output from every command.
 func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
 	start := time.Now()
@@ -229,8 +269,10 @@ func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
 
 	result := SyncResult{}
 
-	// Phase 1: Record component names before pull
+	// Phase 1: Record component names and snapshot compose files before pull
 	oldNames := o.repo.ComponentDirNames(o.role)
+	dirs, _ := o.repo.ComponentDirs(o.role)
+	o.snapshot = snapshotComponents(dirs)
 
 	// Phase 2: Pull
 	emit("--- git pull ---")
@@ -256,14 +298,41 @@ func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
 		result.CommitHash = hash
 	}
 
-	// Phase 3: Record component names after pull
+	// Phase 3: Check if this commit was previously marked as bad
+	o.mu.RLock()
+	isBadCommit := o.badCommit != "" && o.badCommit == hash
+	o.mu.RUnlock()
+	if isBadCommit && !updated {
+		emit(fmt.Sprintf("Skipping apply: commit %s previously failed health checks", hash[:8]))
+		// Still run drift check to keep containers running
+		emit("--- drift check ---")
+		o.checkAndRemediateDrift(ctx, progressFn)
+		o.setStatus("synced", "")
+		o.mu.Lock()
+		o.lastSync = time.Now()
+		result.Components = o.components
+		result.DriftInfo = o.driftInfo
+		o.mu.Unlock()
+		result.DurationMs = time.Since(start).Milliseconds()
+		o.notifySyncDone(result)
+		return
+	}
+
+	// Clear bad commit if a new commit arrived
+	if updated {
+		o.mu.Lock()
+		o.badCommit = ""
+		o.mu.Unlock()
+	}
+
+	// Phase 4: Record component names after pull
 	newNames := o.repo.ComponentDirNames(o.role)
 	newSet := make(map[string]bool, len(newNames))
 	for _, n := range newNames {
 		newSet[n] = true
 	}
 
-	// Phase 4: Stop orphaned components (in old but not in new)
+	// Phase 5: Stop orphaned components (in old but not in new)
 	for _, name := range oldNames {
 		if !newSet[name] {
 			slog.Info("component removed from repo, stopping", "name", name, "role", o.role)
@@ -274,7 +343,7 @@ func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
 		}
 	}
 
-	// Phase 5: Apply current components if repo changed
+	// Phase 6: Apply current components if repo changed
 	if updated {
 		slog.Info("repo changed, applying", "commit", hash[:8])
 		emit(fmt.Sprintf("--- applying components (commit %s) ---", hash[:8]))
@@ -288,11 +357,19 @@ func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
 			o.notifySyncDone(result)
 			return
 		}
+
+		// Phase 6b: Verify health after applying new commit.
+		// If health fails, rollback to previous compose files.
+		emit("--- health verification ---")
+		if err := o.verifyAndRollback(ctx, hash, progressFn); err != nil {
+			slog.Error("health verification failed, rollback attempted", "error", err)
+			result.Error = fmt.Sprintf("rollback: %s", err)
+		}
 	} else {
 		emit("No changes, skipping apply")
 	}
 
-	// Phase 6: Drift detection. Check all components are actually running,
+	// Phase 7: Drift detection. Check all components are actually running,
 	// regardless of whether git changed. Auto-remediate drifted components.
 	emit("--- drift check ---")
 	o.checkAndRemediateDrift(ctx, progressFn)
@@ -307,6 +384,76 @@ func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
 	result.DurationMs = time.Since(start).Milliseconds()
 	emit(fmt.Sprintf("Sync complete in %dms", result.DurationMs))
 	o.notifySyncDone(result)
+}
+
+// verifyAndRollback checks health of all components after a new deploy.
+// If any component fails health checks, restores the previous compose files
+// and re-applies them.
+func (o *Operator) verifyAndRollback(ctx context.Context, commitHash string, progressFn ProgressFunc) error {
+	emit := func(line string) {
+		if progressFn != nil {
+			progressFn(line)
+		}
+	}
+
+	dirs, err := o.repo.ComponentDirs(o.role)
+	if err != nil {
+		return nil // Can't verify without dirs
+	}
+
+	// Verify health of each component
+	var unhealthy []string
+	for _, dir := range dirs {
+		name := filepath.Base(dir)
+		if err := HealthVerify(ctx, dir); err != nil {
+			slog.Warn("component failed health check", "component", name, "error", err)
+			emit(fmt.Sprintf("[%s] UNHEALTHY: %s", name, err))
+			unhealthy = append(unhealthy, name)
+		} else {
+			emit(fmt.Sprintf("[%s] healthy", name))
+		}
+	}
+
+	if len(unhealthy) == 0 {
+		emit("All components healthy")
+		return nil
+	}
+
+	// Health check failed. Attempt rollback.
+	emit(fmt.Sprintf("--- ROLLBACK: %d unhealthy components ---", len(unhealthy)))
+	slog.Warn("initiating rollback", "unhealthy", unhealthy, "commit", commitHash[:8])
+
+	if o.snapshot == nil || len(o.snapshot.files) == 0 {
+		emit("No snapshot available for rollback (first deploy)")
+		o.mu.Lock()
+		o.badCommit = commitHash
+		o.mu.Unlock()
+		return fmt.Errorf("%d components unhealthy, no snapshot for rollback", len(unhealthy))
+	}
+
+	// Restore previous compose files
+	if err := o.snapshot.restore(); err != nil {
+		emit(fmt.Sprintf("Snapshot restore failed: %s", err))
+		o.mu.Lock()
+		o.badCommit = commitHash
+		o.mu.Unlock()
+		return fmt.Errorf("snapshot restore: %w", err)
+	}
+	emit("Previous compose files restored")
+
+	// Clear hash cache and re-apply
+	ClearHashCache()
+	o.injectSecrets(dirs)
+	emit("Re-applying previous configuration")
+	ApplyAll(ctx, dirs, progressFn)
+
+	// Mark this commit as bad so we don't retry it
+	o.mu.Lock()
+	o.badCommit = commitHash
+	o.mu.Unlock()
+
+	emit(fmt.Sprintf("Rollback complete. Commit %s marked as bad.", commitHash[:8]))
+	return fmt.Errorf("rolled back commit %s: %d components unhealthy", commitHash[:8], len(unhealthy))
 }
 
 // checkAndRemediateDrift checks if any expected containers are not running
