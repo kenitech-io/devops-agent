@@ -188,17 +188,21 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 		repoURL = cfg.GetRepoURL()
 		serverRole = cfg.GetServerRole()
 
-		// Apply dashboard-provided values if local config is missing them.
+		// Dashboard-provided values always win (dashboard is source of truth).
 		if params != nil {
-			if repoURL == "" && params.RepoURL != "" {
+			if params.RepoURL != "" {
+				if repoURL != params.RepoURL {
+					slog.Info("updating repo URL from dashboard", "old", repoURL, "new", params.RepoURL)
+				}
 				repoURL = params.RepoURL
 				cfg.RepoURL = repoURL
-				slog.Info("using repo URL from dashboard params", "url", repoURL)
 			}
-			if serverRole == "" && params.Environment != "" {
+			if params.Environment != "" {
+				if serverRole != params.Environment {
+					slog.Info("updating server role from dashboard", "old", serverRole, "new", params.Environment)
+				}
 				serverRole = params.Environment
 				cfg.ServerRole = serverRole
-				slog.Info("using server role from dashboard params", "role", serverRole)
 			}
 		}
 
