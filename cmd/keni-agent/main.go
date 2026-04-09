@@ -558,7 +558,7 @@ func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Messag
 			client.Send(streamMsg)
 		}
 
-		syncTimeout := 120 * time.Second
+		syncTimeout := 300 * time.Second // 5 min: first deploy pulls many images
 		syncCtx, syncCancel := context.WithTimeout(context.WithoutCancel(ctx), syncTimeout)
 		defer syncCancel()
 
