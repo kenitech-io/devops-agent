@@ -233,6 +233,21 @@ func (o *Operator) Run(ctx context.Context) error {
 		// Continue running, will retry on next poll
 	}
 
+	// Notify any waiters (e.g. gitops_sync sent during clone/initial apply)
+	// that the initial deploy is done. Without this, triggered syncs block
+	// until the poll loop picks them up.
+	o.notifySyncDone(SyncResult{
+		CommitHash: hash,
+		Updated:    true,
+	})
+
+	// Drain any trigger that arrived during clone/apply so the poll loop
+	// doesn't immediately re-run the same work.
+	select {
+	case <-o.triggerCh:
+	default:
+	}
+
 	// Phase 3: Poll loop
 	ticker := time.NewTicker(o.pollInterval)
 	defer ticker.Stop()
