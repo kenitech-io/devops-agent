@@ -232,7 +232,10 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 
 		go func() {
 			if err := gitopsOp.Run(ctx); err != nil && ctx.Err() == nil {
-				slog.Error("gitops operator exited", "error", err)
+				slog.Error("gitops operator exited, clearing reference", "error", err)
+				gitopsMu.Lock()
+				gitopsOp = nil
+				gitopsMu.Unlock()
 			}
 		}()
 		slog.Info("gitops operator started", "repo", repoURL, "role", serverRole)
