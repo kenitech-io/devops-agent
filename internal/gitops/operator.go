@@ -228,18 +228,33 @@ func (o *Operator) Run(ctx context.Context) error {
 	slog.Info("repo cloned", "commit", hash[:8])
 
 	// Phase 2: Initial apply
-	if err := o.applyAll(ctx); err != nil {
-		slog.Error("initial apply failed", "error", err)
+	// Stream output to any sync waiters (e.g. gitops_sync sent during clone)
+	// so the dashboard sees real-time docker compose progress.
+	pf := o.collectProgressFn()
+	if pf != nil {
+		pf("--- initial deploy ---")
+	}
+	applyErr := o.applyAll(ctx, pf)
+	if applyErr != nil {
+		slog.Error("initial apply failed", "error", applyErr)
 		// Continue running, will retry on next poll
 	}
 
-	// Notify any waiters (e.g. gitops_sync sent during clone/initial apply)
-	// that the initial deploy is done. Without this, triggered syncs block
-	// until the poll loop picks them up.
-	o.notifySyncDone(SyncResult{
+	// Build result with component details from the apply.
+	o.mu.RLock()
+	initResult := SyncResult{
 		CommitHash: hash,
 		Updated:    true,
-	})
+		Components: o.components,
+		DurationMs: time.Since(o.lastSync).Milliseconds(),
+	}
+	o.mu.RUnlock()
+	if applyErr != nil {
+		initResult.Error = applyErr.Error()
+	}
+
+	// Notify any waiters that the initial deploy is done.
+	o.notifySyncDone(initResult)
 
 	// Drain any trigger that arrived during clone/apply so the poll loop
 	// doesn't immediately re-run the same work.
