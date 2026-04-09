@@ -195,11 +195,12 @@ type AgentGoodbyePayload struct {
 
 // ConfigUpdatePayload is received from the dashboard to update agent config.
 type ConfigUpdatePayload struct {
-	WSEndpoint   string `json:"wsEndpoint,omitempty"`
-	WSToken      string `json:"wsToken,omitempty"`
-	DashboardURL string `json:"dashboardUrl,omitempty"`
-	Environment  string `json:"environment,omitempty"`
-	RestartAfter bool   `json:"restartAfter"`
+	WSEndpoint     string `json:"wsEndpoint,omitempty"`
+	WSToken        string `json:"wsToken,omitempty"`
+	DashboardURL   string `json:"dashboardUrl,omitempty"`
+	Environment    string `json:"environment,omitempty"`
+	RestartAfter   bool   `json:"restartAfter"`
+	RestartGitOps  bool   `json:"restartGitOps"`
 }
 
 // GitSyncComponent describes one IDP component's state after a sync.

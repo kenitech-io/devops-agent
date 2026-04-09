@@ -484,14 +484,17 @@ func handleConfigUpdate(cfg *config.Config, msg *ws.Message, gitopsOp *gitops.Op
 		"environment_changed", envChanged,
 	)
 
-	// If environment changed, try to start operator (may have been nil before) and trigger sync.
-	if envChanged {
-		if gitopsOp != nil {
+	// If environment changed or gitops restart requested, restart operator.
+	if envChanged || payload.RestartGitOps {
+		if gitopsOp != nil && !payload.RestartGitOps {
 			slog.Info("environment changed, triggering gitops sync", "new_environment", payload.Environment)
 			gitopsOp.TriggerSync()
 		} else {
-			// Operator was nil, try starting it now that we have a server role.
-			slog.Info("environment set, attempting to start gitops operator", "environment", payload.Environment)
+			reason := "environment set"
+			if payload.RestartGitOps {
+				reason = "restart requested by dashboard"
+			}
+			slog.Info("starting gitops operator", "reason", reason)
 			startGitOpsOp(client)
 		}
 	}
@@ -511,6 +514,29 @@ func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.
 	case ws.TypePing:
 		handlePing(client, msg)
 	case ws.TypeCommandRequest:
+		// Check for restart_gitops before dispatching (needs access to startGitOpsOp)
+		var peek ws.CommandRequestPayload
+		if err := json.Unmarshal(msg.Payload, &peek); err == nil && peek.Action == "restart_gitops" {
+			go func() {
+				slog.Info("restart_gitops requested, restarting operator")
+				startGitOpsOp(client)
+				time.Sleep(3 * time.Second)
+				newOp := getGitOpsOp()
+				exitCode := 0
+				stdout := "GitOps operator restarted"
+				if newOp == nil {
+					exitCode = 1
+					stdout = "GitOps operator failed to start (check repo access)"
+				}
+				result, _ := ws.NewMessage(ws.TypeCommandResult, ws.CommandResultPayload{
+					RequestID: msg.ID,
+					ExitCode:  exitCode,
+					Stdout:    stdout,
+				})
+				client.Send(result)
+			}()
+			return
+		}
 		cmdWg.Add(1)
 		go func() {
 			defer cmdWg.Done()
