@@ -558,9 +558,7 @@ func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Messag
 			client.Send(streamMsg)
 		}
 
-		syncTimeout := 300 * time.Second // 5 min: first deploy pulls many images
-		syncCtx, syncCancel := context.WithTimeout(context.WithoutCancel(ctx), syncTimeout)
-		defer syncCancel()
+		syncCtx := context.WithoutCancel(ctx)
 
 		result, err := gitopsOp.TriggerSyncWait(syncCtx, sendStream)
 		if err != nil {
