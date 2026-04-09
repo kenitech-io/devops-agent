@@ -41,13 +41,14 @@ type Message struct {
 
 // HeartbeatPayload is sent every 30 seconds.
 type HeartbeatPayload struct {
-	Uptime       int64     `json:"uptime"`
-	LoadAvg      []float64 `json:"loadAvg"`
-	MemoryUsedMb int64     `json:"memoryUsedMb"`
-	MemoryTotalMb int64    `json:"memoryTotalMb"`
-	DiskUsedGb   float64   `json:"diskUsedGb"`
-	DiskTotalGb  float64   `json:"diskTotalGb"`
-	AgentVersion string    `json:"agentVersion"`
+	Uptime        int64     `json:"uptime"`
+	LoadAvg       []float64 `json:"loadAvg"`
+	MemoryUsedMb  int64     `json:"memoryUsedMb"`
+	MemoryTotalMb int64     `json:"memoryTotalMb"`
+	DiskUsedGb    float64   `json:"diskUsedGb"`
+	DiskTotalGb   float64   `json:"diskTotalGb"`
+	AgentVersion  string    `json:"agentVersion"`
+	PublicIP      string    `json:"publicIp,omitempty"`
 }
 
 // ContainerInfo describes a running container.

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kenitech-io/devops-agent/internal/register"
 	"github.com/kenitech-io/devops-agent/internal/ws"
 )
 
@@ -27,6 +28,7 @@ func CollectHeartbeat(version string) (*ws.HeartbeatPayload, error) {
 		DiskUsedGb:    diskUsed,
 		DiskTotalGb:   diskTotal,
 		AgentVersion:  version,
+		PublicIP:      register.PublicIP(),
 	}, nil
 }
 
