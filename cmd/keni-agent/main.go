@@ -262,15 +262,19 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 		errCh := make(chan error, 1)
 		op := gitopsOp
 		go func() {
-			if err := op.Run(opCtx); err != nil && opCtx.Err() == nil {
+			err := op.Run(opCtx)
+			if err != nil && opCtx.Err() == nil {
 				slog.Error("gitops operator exited, clearing reference", "error", err)
+				// Signal the error BEFORE acquiring the mutex.
+				// startOperatorOnce's caller holds gitopsMu, so acquiring it
+				// here first would deadlock and prevent errCh from being sent.
+				errCh <- err
 				gitopsMu.Lock()
 				if gitopsOp == op {
 					gitopsOp = nil
 					gitopsCancel = nil
 				}
 				gitopsMu.Unlock()
-				errCh <- err
 			}
 			close(errCh)
 		}()
