@@ -162,22 +162,47 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 
 	// GitOps operator: may be started at boot or later via config_update.
 	var gitopsOp *gitops.Operator
-	var gitopsMu sync.Mutex // protects gitopsOp pointer
+	var gitopsCancel context.CancelFunc // per-operator cancel
+	var gitopsMu sync.Mutex             // protects gitopsOp + gitopsCancel
 
-	// startGitOpsOperator creates and starts the operator if repo URL and role are available.
-	// Safe to call multiple times: no-op if already running.
-	startGitOpsOperator := func(client *ws.Client) {
-		gitopsMu.Lock()
-		defer gitopsMu.Unlock()
+	// stopGitOpsOperator cancels the running operator and clears the reference.
+	// Must be called with gitopsMu held.
+	stopGitOpsOperatorLocked := func() {
+		if gitopsCancel != nil {
+			gitopsCancel()
+			gitopsCancel = nil
+		}
+		gitopsOp = nil
+	}
 
-		if gitopsOp != nil {
-			return // already running
+	// restartParams are optional provisioning hints sent by the dashboard.
+	type restartParams struct {
+		RepoURL     string `json:"repoUrl"`
+		Environment string `json:"environment"`
+	}
+
+	// resolveConfig ensures repo URL and server role are available, using
+	// params from the dashboard, local config, and the git-token API as fallbacks.
+	// Saves any new values to disk so future boots work without the dashboard.
+	resolveConfig := func(params *restartParams) (repoURL, serverRole string) {
+		repoURL = cfg.GetRepoURL()
+		serverRole = cfg.GetServerRole()
+
+		// Apply dashboard-provided values if local config is missing them.
+		if params != nil {
+			if repoURL == "" && params.RepoURL != "" {
+				repoURL = params.RepoURL
+				cfg.RepoURL = repoURL
+				slog.Info("using repo URL from dashboard params", "url", repoURL)
+			}
+			if serverRole == "" && params.Environment != "" {
+				serverRole = params.Environment
+				cfg.ServerRole = serverRole
+				slog.Info("using server role from dashboard params", "role", serverRole)
+			}
 		}
 
-		repoURL := cfg.GetRepoURL()
-		serverRole := cfg.GetServerRole()
-
-		// Try fetching repo URL from dashboard if not in config
+		// Last resort: ask the dashboard git-token endpoint.
 		if repoURL == "" && cfg.DashboardURL != "" && cfg.AgentID != "" && cfg.WSToken != "" {
 			slog.Info("no repo URL in config, fetching from dashboard")
 			gitTokenResp, err := secrets.FetchGitToken(cfg.DashboardURL, cfg.AgentID, cfg.WSToken)
@@ -186,26 +211,28 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 			} else if gitTokenResp.RepoURL != "" {
 				repoURL = gitTokenResp.RepoURL
 				cfg.RepoURL = repoURL
-				if saveErr := cfg.Save(); saveErr != nil {
-					slog.Warn("could not save repo URL to config", "error", saveErr)
-				}
 				slog.Info("fetched repo URL from dashboard", "url", repoURL)
 			}
 		}
 
-		if repoURL == "" || serverRole == "" {
-			slog.Info("gitops operator not started (missing repo URL or server role)",
-				"has_repo", repoURL != "", "has_role", serverRole != "")
-			return
+		// Persist any newly discovered values.
+		if repoURL != "" || serverRole != "" {
+			if saveErr := cfg.Save(); saveErr != nil {
+				slog.Warn("could not save config", "error", saveErr)
+			}
 		}
+		return
+	}
 
+	// startOperatorOnce creates and launches the operator. Returns "" on success.
+	// Caller must hold gitopsMu and ensure gitopsOp == nil.
+	startOperatorOnce := func(client *ws.Client, repoURL, serverRole string) string {
 		repo, err := gitops.NewRepo(repoURL, cfg.GetDeployToken(), config.GitOpsDataDir)
 		if err != nil {
-			slog.Error("invalid gitops repo config", "error", err)
-			return
+			return fmt.Sprintf("invalid repo config: %v", err)
 		}
 
-		// Set token func to fetch fresh installation tokens from dashboard
+		// Set token func to fetch fresh installation tokens from dashboard.
 		if cfg.DashboardURL != "" && cfg.AgentID != "" && cfg.WSToken != "" {
 			repo.SetTokenFunc(func() (string, error) {
 				resp, err := secrets.FetchGitToken(cfg.DashboardURL, cfg.AgentID, cfg.WSToken)
@@ -223,22 +250,128 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 			WSToken:      cfg.WSToken,
 		})
 
-		// Register sync callback to report results to dashboard
 		if client != nil {
 			gitopsOp.SetSyncCallback(func(result gitops.SyncResult) {
 				sendGitSyncReport(client, serverRole, result)
 			})
 		}
 
+		opCtx, opCancel := context.WithCancel(ctx)
+		gitopsCancel = opCancel
+
+		errCh := make(chan error, 1)
+		op := gitopsOp
 		go func() {
-			if err := gitopsOp.Run(ctx); err != nil && ctx.Err() == nil {
+			if err := op.Run(opCtx); err != nil && opCtx.Err() == nil {
 				slog.Error("gitops operator exited, clearing reference", "error", err)
 				gitopsMu.Lock()
-				gitopsOp = nil
+				if gitopsOp == op {
+					gitopsOp = nil
+					gitopsCancel = nil
+				}
 				gitopsMu.Unlock()
+				errCh <- err
 			}
+			close(errCh)
 		}()
-		slog.Info("gitops operator started", "repo", repoURL, "role", serverRole)
+
+		select {
+		case err := <-errCh:
+			if err != nil {
+				return fmt.Sprintf("operator failed: %v", err)
+			}
+		case <-time.After(8 * time.Second):
+			// Still running after 8s, clone succeeded.
+		}
+		return ""
+	}
+
+	// startGitOpsOperator resolves config, cleans stale state, and starts the operator.
+	// Returns "" on success. Safe to call when already running (no-op).
+	startGitOpsOperator := func(client *ws.Client) string {
+		gitopsMu.Lock()
+		if gitopsOp != nil {
+			gitopsMu.Unlock()
+			return "" // already running
+		}
+		gitopsMu.Unlock()
+
+		repoURL, serverRole := resolveConfig(nil)
+		if repoURL == "" || serverRole == "" {
+			slog.Info("gitops operator not started (missing config)",
+				"has_repo", repoURL != "", "has_role", serverRole != "")
+			return ""
+		}
+
+		gitopsMu.Lock()
+		defer gitopsMu.Unlock()
+		if gitopsOp != nil {
+			return ""
+		}
+		return startOperatorOnce(client, repoURL, serverRole)
+	}
+
+	// restartGitOpsOperator stops the existing operator, resolves config from
+	// params + dashboard, cleans stale clone data, and starts fresh.
+	// Retries once on clone failure (covers newly created repos, token propagation).
+	restartGitOpsOperator := func(client *ws.Client, rawParams json.RawMessage) string {
+		var params *restartParams
+		if len(rawParams) > 0 {
+			var p restartParams
+			if err := json.Unmarshal(rawParams, &p); err == nil {
+				params = &p
+			}
+		}
+		gitopsMu.Lock()
+		stopGitOpsOperatorLocked()
+		gitopsMu.Unlock()
+
+		// Clean stale clone so a fresh token and URL are used.
+		if err := os.RemoveAll(config.GitOpsDataDir); err != nil {
+			slog.Warn("could not clean gitops data dir", "error", err)
+		}
+
+		repoURL, serverRole := resolveConfig(params)
+		if repoURL == "" || serverRole == "" {
+			missing := []string{}
+			if repoURL == "" {
+				missing = append(missing, "repo URL")
+			}
+			if serverRole == "" {
+				missing = append(missing, "server role")
+			}
+			return fmt.Sprintf("missing %s", strings.Join(missing, " and "))
+		}
+
+		gitopsMu.Lock()
+		errMsg := startOperatorOnce(client, repoURL, serverRole)
+		gitopsMu.Unlock()
+
+		if errMsg == "" {
+			slog.Info("gitops operator restarted", "repo", repoURL, "role", serverRole)
+			return ""
+		}
+
+		// First attempt failed. Retry once after a short delay.
+		// Covers: newly created repos not yet visible, GitHub token propagation.
+		slog.Info("first operator start failed, retrying in 3s", "error", errMsg)
+		time.Sleep(3 * time.Second)
+
+		// Clean again for a fresh clone.
+		_ = os.RemoveAll(config.GitOpsDataDir)
+
+		gitopsMu.Lock()
+		if gitopsOp != nil {
+			gitopsMu.Unlock()
+			return "" // started in the meantime
+		}
+		errMsg = startOperatorOnce(client, repoURL, serverRole)
+		gitopsMu.Unlock()
+
+		if errMsg == "" {
+			slog.Info("gitops operator restarted on retry", "repo", repoURL, "role", serverRole)
+		}
+		return errMsg
 	}
 
 	// getGitOpsOp returns the current operator (thread-safe).
@@ -253,7 +386,7 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 
 	var client *ws.Client
 	handler := func(msg *ws.Message) {
-		handleDashboardMessage(ctx, client, cfg, msg, &cmdMu, &cmdWg, getGitOpsOp, startGitOpsOperator)
+		handleDashboardMessage(ctx, client, cfg, msg, &cmdMu, &cmdWg, getGitOpsOp, startGitOpsOperator, restartGitOpsOperator)
 	}
 	client = ws.NewClient(cfg.WSEndpoint, cfg.AgentID, cfg.WSToken, handler)
 
@@ -270,6 +403,9 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 		metrics.SetWSConnected(connected)
 		if connected {
 			sendConfigBackup(client, cfg)
+			// Retry operator start on reconnect. If the operator failed earlier
+			// (e.g. dashboard unreachable for token), the connection is now back.
+			go startGitOpsOperator(client)
 		} else {
 			metrics.WebSocketReconnections.Inc()
 		}
@@ -450,7 +586,7 @@ func sendConfigBackup(client *ws.Client, cfg *config.Config) {
 	}
 }
 
-func handleConfigUpdate(cfg *config.Config, msg *ws.Message, gitopsOp *gitops.Operator, startGitOpsOp func(*ws.Client), client *ws.Client) {
+func handleConfigUpdate(cfg *config.Config, msg *ws.Message, gitopsOp *gitops.Operator, startGitOpsOp func(*ws.Client) string, client *ws.Client) {
 	var payload ws.ConfigUpdatePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		slog.Error("parsing config_update", "error", err)
@@ -509,24 +645,22 @@ func handleConfigUpdate(cfg *config.Config, msg *ws.Message, gitopsOp *gitops.Op
 	}
 }
 
-func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.Config, msg *ws.Message, cmdMu *sync.Mutex, cmdWg *sync.WaitGroup, getGitOpsOp func() *gitops.Operator, startGitOpsOp func(*ws.Client)) {
+func handleDashboardMessage(ctx context.Context, client *ws.Client, cfg *config.Config, msg *ws.Message, cmdMu *sync.Mutex, cmdWg *sync.WaitGroup, getGitOpsOp func() *gitops.Operator, startGitOpsOp func(*ws.Client) string, restartGitOpsOp func(*ws.Client, json.RawMessage) string) {
 	switch msg.Type {
 	case ws.TypePing:
 		handlePing(client, msg)
 	case ws.TypeCommandRequest:
-		// Check for restart_gitops before dispatching (needs access to startGitOpsOp)
+		// Check for restart_gitops before dispatching (needs access to restartGitOpsOp)
 		var peek ws.CommandRequestPayload
 		if err := json.Unmarshal(msg.Payload, &peek); err == nil && peek.Action == "restart_gitops" {
 			go func() {
 				slog.Info("restart_gitops requested, restarting operator")
-				startGitOpsOp(client)
-				time.Sleep(3 * time.Second)
-				newOp := getGitOpsOp()
+				errMsg := restartGitOpsOp(client, peek.Params)
 				exitCode := 0
 				stdout := "GitOps operator restarted"
-				if newOp == nil {
+				if errMsg != "" {
 					exitCode = 1
-					stdout = "GitOps operator failed to start (check repo access)"
+					stdout = errMsg
 				}
 				result, _ := ws.NewMessage(ws.TypeCommandResult, ws.CommandResultPayload{
 					RequestID: msg.ID,
