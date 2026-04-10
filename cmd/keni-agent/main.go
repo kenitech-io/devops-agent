@@ -713,6 +713,34 @@ func handleCommandRequest(ctx context.Context, client *ws.Client, msg *ws.Messag
 
 	slog.Info("executing command", "action", req.Action, "request_id", msg.ID)
 
+	// gitops_diff: compare desired state (git) vs running containers (no mutex needed)
+	if req.Action == "gitops_diff" {
+		if gitopsOp == nil {
+			sendError(client, "EXECUTION_FAILED", "gitops operator not running", msg.ID)
+			return
+		}
+
+		var params struct {
+			Components []string `json:"components"`
+		}
+		_ = json.Unmarshal(req.Params, &params)
+
+		diff, err := gitopsOp.Diff(ctx, params.Components)
+		if err != nil {
+			sendError(client, "EXECUTION_FAILED", err.Error(), msg.ID)
+			return
+		}
+
+		diffJSON, _ := json.Marshal(diff)
+		result, _ := ws.NewMessage(ws.TypeCommandResult, ws.CommandResultPayload{
+			RequestID: msg.ID,
+			ExitCode:  0,
+			Stdout:    string(diffJSON),
+		})
+		client.Send(result)
+		return
+	}
+
 	// gitops_sync: trigger operator and stream progress until complete (no mutex needed)
 	if req.Action == "gitops_sync" {
 		if gitopsOp == nil {
