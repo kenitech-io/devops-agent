@@ -18,12 +18,12 @@ type componentSnapshot struct {
 	files map[string]map[string][]byte // dir -> filename -> content
 }
 
-// snapshotComponents saves the compose files and .env for each component directory.
+// snapshotComponents saves the compose files and env files for each component directory.
 func snapshotComponents(dirs []string) *componentSnapshot {
 	s := &componentSnapshot{files: make(map[string]map[string][]byte)}
 	for _, dir := range dirs {
 		s.files[dir] = make(map[string][]byte)
-		for _, name := range []string{"docker-compose.yml", ".env"} {
+		for _, name := range []string{"docker-compose.yml", "config.env", "secrets.env"} {
 			data, err := os.ReadFile(filepath.Join(dir, name))
 			if err == nil {
 				s.files[dir][name] = data
@@ -573,7 +573,7 @@ func (o *Operator) applyAll(ctx context.Context, progressFn ...ProgressFunc) err
 		return nil
 	}
 
-	// Inject secrets into .env files before applying.
+	// Inject secrets into secrets.env files before applying.
 	// If secret injection fails, proceed anyway: some components may work without secrets,
 	// and health checks will catch the ones that don't.
 	if err := o.injectSecrets(dirs); err != nil {
@@ -613,26 +613,31 @@ func (o *Operator) applyAll(ctx context.Context, progressFn ...ProgressFunc) err
 	return nil
 }
 
-// injectSecrets fetches secrets from the dashboard and injects them into .env
-// files that contain ${VAR} patterns. Returns error if secrets could not be fetched
-// (so caller can decide whether to proceed or fail).
+// injectSecrets fetches secrets from the dashboard and writes them into secrets.env
+// files for each component. The secrets.env file contains ${VAR} placeholders from git,
+// which are resolved with real values fetched from the dashboard API.
+// Returns error if secrets could not be fetched (so caller can decide whether to proceed or fail).
 func (o *Operator) injectSecrets(dirs []string) error {
 	if o.secretsCfg == nil || o.secretsCfg.DashboardURL == "" || o.secretsCfg.WSToken == "" {
+		slog.Warn("secret injection skipped: no dashboard credentials configured")
 		return nil
 	}
 
-	// Check if any dir has an .env file before fetching
-	hasEnvFiles := false
+	// Check if any dir has a secrets.env file before fetching
+	hasSecretsFiles := false
 	for _, dir := range dirs {
-		envPath := filepath.Join(dir, ".env")
-		if _, err := os.Stat(envPath); err == nil {
-			hasEnvFiles = true
+		secretsPath := filepath.Join(dir, "secrets.env")
+		if _, err := os.Stat(secretsPath); err == nil {
+			hasSecretsFiles = true
 			break
 		}
 	}
-	if !hasEnvFiles {
+	if !hasSecretsFiles {
+		slog.Debug("no secrets.env files found, skipping injection")
 		return nil
 	}
+
+	slog.Info("fetching secrets from dashboard", "url", o.secretsCfg.DashboardURL, "agentId", o.secretsCfg.AgentID)
 
 	fetched, err := secrets.FetchSecrets(o.secretsCfg.DashboardURL, o.secretsCfg.AgentID, o.secretsCfg.WSToken)
 	if err != nil {
@@ -641,27 +646,33 @@ func (o *Operator) injectSecrets(dirs []string) error {
 	}
 
 	if len(fetched) == 0 {
-		slog.Info("no secrets returned from dashboard")
+		slog.Warn("no secrets returned from dashboard, components using ${VAR} in secrets.env will start with empty values")
 		return nil
 	}
 
+	names := make([]string, len(fetched))
+	for i, s := range fetched {
+		names[i] = s.Name
+	}
+	slog.Info("fetched secrets from dashboard", "count", len(fetched), "names", names)
+
 	var injected, failed int
 	for _, dir := range dirs {
-		envPath := filepath.Join(dir, ".env")
-		if _, err := os.Stat(envPath); err != nil {
+		secretsPath := filepath.Join(dir, "secrets.env")
+		if _, err := os.Stat(secretsPath); err != nil {
 			continue
 		}
-		if err := secrets.InjectSecrets(envPath, fetched); err != nil {
-			slog.Error("failed to inject secrets", "dir", dir, "error", err)
+		if err := secrets.WriteSecretsEnv(secretsPath, fetched); err != nil {
+			slog.Error("failed to write secrets.env", "dir", dir, "error", err)
 			failed++
 		} else {
 			injected++
 		}
 	}
-	slog.Info("secret injection complete", "injected", injected, "failed", failed)
+	slog.Info("secrets.env injection complete", "injected", injected, "failed", failed)
 
 	if failed > 0 {
-		return fmt.Errorf("secret injection failed for %d component(s)", failed)
+		return fmt.Errorf("secrets.env write failed for %d component(s)", failed)
 	}
 	return nil
 }

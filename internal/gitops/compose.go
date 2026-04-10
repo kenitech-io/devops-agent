@@ -15,6 +15,22 @@ import (
 	"time"
 )
 
+// composeArgs builds the docker compose argument list, adding --env-file flags
+// for config.env and secrets.env if they exist in the component directory.
+func composeArgs(dir string, subcommand ...string) []string {
+	args := []string{"compose"}
+	configEnv := filepath.Join(dir, "config.env")
+	secretsEnv := filepath.Join(dir, "secrets.env")
+	if _, err := os.Stat(configEnv); err == nil {
+		args = append(args, "--env-file", "config.env")
+	}
+	if _, err := os.Stat(secretsEnv); err == nil {
+		args = append(args, "--env-file", "secrets.env")
+	}
+	args = append(args, subcommand...)
+	return args
+}
+
 // ComponentResult holds the result of applying a single component.
 type ComponentResult struct {
 	Name      string
@@ -31,22 +47,24 @@ var (
 	composeHashes = make(map[string]string) // dir path -> sha256 hex
 )
 
-// composeFileHash returns the SHA-256 hex of the docker-compose.yml in dir.
+// composeFileHash returns the SHA-256 hex of the docker-compose.yml + env files in dir.
 func composeFileHash(dir string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "docker-compose.yml"))
 	if err != nil {
 		return "", err
 	}
-	// Also include .env if it exists
-	envData, _ := os.ReadFile(filepath.Join(dir, ".env"))
 	h := sha256.New()
 	h.Write(data)
-	h.Write(envData)
+	// Include config.env and secrets.env if they exist
+	configData, _ := os.ReadFile(filepath.Join(dir, "config.env"))
+	h.Write(configData)
+	secretsData, _ := os.ReadFile(filepath.Join(dir, "secrets.env"))
+	h.Write(secretsData)
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // ApplyComponent runs docker compose up -d in the given component directory.
-// Skips unchanged components (compose file + .env hash match) to avoid unnecessary restarts.
+// Skips unchanged components (compose file + env file hash match) to avoid unnecessary restarts.
 func ApplyComponent(ctx context.Context, dir string, progressFn ...ProgressFunc) *ComponentResult {
 	name := filepath.Base(dir)
 	result := &ComponentResult{
@@ -77,12 +95,13 @@ func ApplyComponent(ctx context.Context, dir string, progressFn ...ProgressFunc)
 		}
 	}
 
-	slog.Info("applying component", "name", name, "dir", dir)
+	args := composeArgs(dir, "up", "-d", "--pull", "always", "--remove-orphans")
+	slog.Info("applying component", "name", name, "dir", dir, "cmd", "docker "+strings.Join(args, " "))
 	if pf != nil {
-		pf(fmt.Sprintf("[%s] docker compose up -d --pull always --remove-orphans", name))
+		pf(fmt.Sprintf("[%s] docker %s", name, strings.Join(args, " ")))
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", "compose", "up", "-d", "--pull", "always", "--remove-orphans")
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = dir
 
 	// Prefix each output line with the component name.
@@ -155,7 +174,9 @@ func DriftCheck(ctx context.Context, dir string) (*DriftInfo, error) {
 	info := &DriftInfo{Name: name}
 
 	// Get ALL containers for this compose project (not just running)
-	cmd := exec.CommandContext(ctx, "docker", "compose", "ps", "--format", "json")
+	args := composeArgs(dir, "ps", "--format", "json")
+	slog.Debug("drift check", "name", name, "cmd", "docker "+strings.Join(args, " "))
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = dir
 
 	out, err := cmd.Output()
@@ -225,9 +246,9 @@ func ApplyAll(ctx context.Context, dirs []string, progressFn ...ProgressFunc) []
 // StopComponent runs docker compose down in a component directory.
 func StopComponent(ctx context.Context, dir string) error {
 	name := filepath.Base(dir)
-	slog.Info("stopping component", "name", name, "dir", dir)
-
-	cmd := exec.CommandContext(ctx, "docker", "compose", "down", "--remove-orphans")
+	args := composeArgs(dir, "down", "--remove-orphans")
+	slog.Info("stopping component", "name", name, "dir", dir, "cmd", "docker "+strings.Join(args, " "))
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = dir
 
 	out, err := cmd.CombinedOutput()
@@ -268,7 +289,8 @@ func StopComponentByProject(ctx context.Context, projectName string, progressFn 
 
 // ComponentStatus checks if a component's containers are running.
 func ComponentStatus(ctx context.Context, dir string) string {
-	cmd := exec.CommandContext(ctx, "docker", "compose", "ps", "--format", "json", "--status", "running")
+	args := composeArgs(dir, "ps", "--format", "json", "--status", "running")
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = dir
 
 	out, err := cmd.Output()
