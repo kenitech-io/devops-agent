@@ -21,14 +21,15 @@ func CollectHeartbeat(version string) (*ws.HeartbeatPayload, error) {
 	diskUsed, diskTotal := getDiskInfo()
 
 	return &ws.HeartbeatPayload{
-		Uptime:        uptime,
-		LoadAvg:       loadAvg,
-		MemoryUsedMb:  memUsed,
-		MemoryTotalMb: memTotal,
-		DiskUsedGb:    diskUsed,
-		DiskTotalGb:   diskTotal,
-		AgentVersion:  version,
-		PublicIP:      register.PublicIP(),
+		Uptime:          uptime,
+		LoadAvg:         loadAvg,
+		MemoryUsedMb:    memUsed,
+		MemoryTotalMb:   memTotal,
+		DiskUsedGb:      diskUsed,
+		DiskTotalGb:     diskTotal,
+		AgentVersion:    version,
+		ProtocolVersion: ws.ProtocolVersion,
+		PublicIP:        register.PublicIP(),
 	}, nil
 }
 

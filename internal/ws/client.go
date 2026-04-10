@@ -142,7 +142,7 @@ func (c *Client) SendDirect(msg *Message) error {
 }
 
 func (c *Client) connectAndServe(ctx context.Context) error {
-	url := fmt.Sprintf("%s?agentId=%s", c.wsEndpoint, c.agentID)
+	url := fmt.Sprintf("%s?agentId=%s&protocolVersion=%d", c.wsEndpoint, c.agentID, ProtocolVersion)
 	slog.Info("connecting to dashboard", "url", url)
 
 	dialer := websocket.Dialer{

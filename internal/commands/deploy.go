@@ -37,7 +37,8 @@ const peripheryComposeTemplate = `services:
     security_opt:
       - no-new-privileges:true
     env_file:
-      - .env
+      - config.env
+      - secrets.env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /proc:/proc
@@ -56,11 +57,13 @@ networks:
     name: komodo
 `
 
-const peripheryEnvTemplate = `PERIPHERY_PASSKEYS=%s
-PERIPHERY_ROOT_DIRECTORY=/srv/projects
+const peripheryConfigEnvTemplate = `PERIPHERY_ROOT_DIRECTORY=/srv/projects
 PERIPHERY_DISABLE_TERMINALS=false
 PERIPHERY_SSL_ENABLED=false
 TZ=Etc/UTC
+`
+
+const peripherySecretsEnvTemplate = `PERIPHERY_PASSKEYS=%s
 `
 
 // ExecuteDeployPeriphery handles the deploy_periphery action.
@@ -94,11 +97,17 @@ func ExecuteDeployPeriphery(ctx context.Context, params json.RawMessage) (*Resul
 		return nil, fmt.Errorf("EXECUTION_FAILED: writing compose file: %w", err)
 	}
 
-	// Write .env
-	envPath := filepath.Join(deployDir, ".env")
-	envContent := fmt.Sprintf(peripheryEnvTemplate, p.Passkey)
-	if err := os.WriteFile(envPath, []byte(envContent), 0600); err != nil {
-		return nil, fmt.Errorf("EXECUTION_FAILED: writing env file: %w", err)
+	// Write config.env (non-secret config)
+	configEnvPath := filepath.Join(deployDir, "config.env")
+	if err := os.WriteFile(configEnvPath, []byte(peripheryConfigEnvTemplate), 0644); err != nil {
+		return nil, fmt.Errorf("EXECUTION_FAILED: writing config.env: %w", err)
+	}
+
+	// Write secrets.env (secrets, never committed to git)
+	secretsEnvPath := filepath.Join(deployDir, "secrets.env")
+	secretsContent := fmt.Sprintf(peripherySecretsEnvTemplate, p.Passkey)
+	if err := os.WriteFile(secretsEnvPath, []byte(secretsContent), 0600); err != nil {
+		return nil, fmt.Errorf("EXECUTION_FAILED: writing secrets.env: %w", err)
 	}
 
 	// Run docker compose up

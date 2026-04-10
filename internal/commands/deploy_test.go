@@ -2,6 +2,7 @@ package commands
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,20 +144,21 @@ func composeForPeriphery(image string) string {
 	return strings.ReplaceAll(peripheryComposeTemplate, "%s", image)
 }
 
-func TestPeripheryEnvTemplate(t *testing.T) {
+func TestPeripheryEnvTemplates(t *testing.T) {
+	// Config env should contain non-secret settings
+	if !strings.Contains(peripheryConfigEnvTemplate, "PERIPHERY_ROOT_DIRECTORY=/srv/projects") {
+		t.Error("config.env should contain root directory")
+	}
+	if strings.Contains(peripheryConfigEnvTemplate, "PASSKEYS") {
+		t.Error("config.env must not contain passkeys")
+	}
+
+	// Secrets env should contain passkey placeholder
 	passkey := "test-secret-passkey-123"
-	content := envForPeriphery(passkey)
-
-	if !strings.Contains(content, "PERIPHERY_PASSKEYS="+passkey) {
-		t.Error("env should contain passkey")
+	secretsContent := fmt.Sprintf(peripherySecretsEnvTemplate, passkey)
+	if !strings.Contains(secretsContent, "PERIPHERY_PASSKEYS="+passkey) {
+		t.Error("secrets.env should contain passkey")
 	}
-	if !strings.Contains(content, "PERIPHERY_ROOT_DIRECTORY=/srv/projects") {
-		t.Error("env should contain root directory")
-	}
-}
-
-func envForPeriphery(passkey string) string {
-	return strings.ReplaceAll(peripheryEnvTemplate, "%s", passkey)
 }
 
 func TestBuildCommand_DeployPeriphery_NoConfirm(t *testing.T) {
@@ -237,13 +239,18 @@ func TestDeployPeripheryWritesFiles(t *testing.T) {
 		t.Fatalf("write compose failed: %v", err)
 	}
 
-	envPath := filepath.Join(deployDir, ".env")
-	envContent := envForPeriphery(p.Passkey)
-	if err := os.WriteFile(envPath, []byte(envContent), 0600); err != nil {
-		t.Fatalf("write env failed: %v", err)
+	configEnvPath := filepath.Join(deployDir, "config.env")
+	if err := os.WriteFile(configEnvPath, []byte(peripheryConfigEnvTemplate), 0644); err != nil {
+		t.Fatalf("write config.env failed: %v", err)
 	}
 
-	// Verify files
+	secretsEnvPath := filepath.Join(deployDir, "secrets.env")
+	secretsContent := fmt.Sprintf(peripherySecretsEnvTemplate, p.Passkey)
+	if err := os.WriteFile(secretsEnvPath, []byte(secretsContent), 0600); err != nil {
+		t.Fatalf("write secrets.env failed: %v", err)
+	}
+
+	// Verify compose file
 	data, err := os.ReadFile(composePath)
 	if err != nil {
 		t.Fatalf("read compose failed: %v", err)
@@ -252,20 +259,30 @@ func TestDeployPeripheryWritesFiles(t *testing.T) {
 		t.Error("compose file should contain image")
 	}
 
-	data, err = os.ReadFile(envPath)
+	// Verify config.env has no secrets
+	data, err = os.ReadFile(configEnvPath)
 	if err != nil {
-		t.Fatalf("read env failed: %v", err)
+		t.Fatalf("read config.env failed: %v", err)
 	}
-	if !strings.Contains(string(data), p.Passkey) {
-		t.Error("env file should contain passkey")
+	if strings.Contains(string(data), p.Passkey) {
+		t.Error("config.env must not contain passkey")
 	}
 
-	// Verify env file permissions
-	info, err := os.Stat(envPath)
+	// Verify secrets.env has passkey
+	data, err = os.ReadFile(secretsEnvPath)
 	if err != nil {
-		t.Fatalf("stat env failed: %v", err)
+		t.Fatalf("read secrets.env failed: %v", err)
+	}
+	if !strings.Contains(string(data), p.Passkey) {
+		t.Error("secrets.env should contain passkey")
+	}
+
+	// Verify secrets.env file permissions
+	info, err := os.Stat(secretsEnvPath)
+	if err != nil {
+		t.Fatalf("stat secrets.env failed: %v", err)
 	}
 	if info.Mode().Perm() != 0600 {
-		t.Errorf("env file should be 0600, got %o", info.Mode().Perm())
+		t.Errorf("secrets.env should be 0600, got %o", info.Mode().Perm())
 	}
 }

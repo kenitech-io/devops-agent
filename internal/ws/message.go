@@ -8,6 +8,12 @@ import (
 	"github.com/google/uuid"
 )
 
+// ProtocolVersion is the agent-dashboard protocol version.
+// Bump this integer ONLY when making breaking changes to the contract:
+// new required message fields, changed API endpoints, changed file conventions, etc.
+// See devops-docs/platform/PROTOCOL.md for the changelog.
+const ProtocolVersion = 1
+
 // Message types sent by the agent.
 const (
 	TypeHeartbeat       = "heartbeat"
@@ -41,14 +47,15 @@ type Message struct {
 
 // HeartbeatPayload is sent every 30 seconds.
 type HeartbeatPayload struct {
-	Uptime        int64     `json:"uptime"`
-	LoadAvg       []float64 `json:"loadAvg"`
-	MemoryUsedMb  int64     `json:"memoryUsedMb"`
-	MemoryTotalMb int64     `json:"memoryTotalMb"`
-	DiskUsedGb    float64   `json:"diskUsedGb"`
-	DiskTotalGb   float64   `json:"diskTotalGb"`
-	AgentVersion  string    `json:"agentVersion"`
-	PublicIP      string    `json:"publicIp,omitempty"`
+	Uptime          int64     `json:"uptime"`
+	LoadAvg         []float64 `json:"loadAvg"`
+	MemoryUsedMb    int64     `json:"memoryUsedMb"`
+	MemoryTotalMb   int64     `json:"memoryTotalMb"`
+	DiskUsedGb      float64   `json:"diskUsedGb"`
+	DiskTotalGb     float64   `json:"diskTotalGb"`
+	AgentVersion    string    `json:"agentVersion"`
+	ProtocolVersion int       `json:"protocolVersion"`
+	PublicIP        string    `json:"publicIp,omitempty"`
 }
 
 // ContainerInfo describes a running container.
@@ -179,13 +186,14 @@ type ErrorPayload struct {
 // ConfigBackupPayload is sent to the dashboard on first connect.
 // It contains non-secret config fields so the dashboard can track agent state.
 type ConfigBackupPayload struct {
-	AgentID       string `json:"agentId"`
-	AssignedIP    string `json:"assignedIp"`
-	WSEndpoint    string `json:"wsEndpoint"`
-	DashboardURL  string `json:"dashboardUrl"`
-	AgentVersion  string `json:"agentVersion"`
-	ConfigVersion int    `json:"configVersion"`
-	PublicIP      string `json:"publicIp,omitempty"`
+	AgentID         string `json:"agentId"`
+	AssignedIP      string `json:"assignedIp"`
+	WSEndpoint      string `json:"wsEndpoint"`
+	DashboardURL    string `json:"dashboardUrl"`
+	AgentVersion    string `json:"agentVersion"`
+	ProtocolVersion int    `json:"protocolVersion"`
+	ConfigVersion   int    `json:"configVersion"`
+	PublicIP        string `json:"publicIp,omitempty"`
 }
 
 // AgentGoodbyePayload is sent before the agent disconnects.

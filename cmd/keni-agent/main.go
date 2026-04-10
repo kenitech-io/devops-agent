@@ -572,13 +572,14 @@ func sendGoodbye(client *ws.Client, reason string) {
 
 func sendConfigBackup(client *ws.Client, cfg *config.Config) {
 	payload := ws.ConfigBackupPayload{
-		AgentID:       cfg.AgentID,
-		AssignedIP:    cfg.AssignedIP,
-		WSEndpoint:    cfg.WSEndpoint,
-		DashboardURL:  cfg.DashboardURL,
-		AgentVersion:  version,
-		ConfigVersion: cfg.ConfigVersion,
-		PublicIP:      register.PublicIP(),
+		AgentID:         cfg.AgentID,
+		AssignedIP:      cfg.AssignedIP,
+		WSEndpoint:      cfg.WSEndpoint,
+		DashboardURL:    cfg.DashboardURL,
+		AgentVersion:    version,
+		ProtocolVersion: ws.ProtocolVersion,
+		ConfigVersion:   cfg.ConfigVersion,
+		PublicIP:        register.PublicIP(),
 	}
 
 	msg, err := ws.NewMessage(ws.TypeConfigBackup, payload)
