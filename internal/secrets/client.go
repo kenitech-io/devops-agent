@@ -23,7 +23,7 @@ type SecretsResponse struct {
 	Secrets []Secret `json:"secrets"`
 }
 
-// varPattern matches ${VARIABLE_NAME} patterns in .env files.
+// varPattern matches ${VARIABLE_NAME} patterns in secrets.env files.
 var varPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // FetchSecrets retrieves decrypted secrets from the dashboard API.
@@ -63,13 +63,14 @@ func FetchSecrets(dashboardURL, agentID, wsToken string) ([]Secret, error) {
 	return result.Secrets, nil
 }
 
-// InjectSecrets reads an .env file, replaces ${VAR} patterns with matching
-// secret values, and writes the resolved file back. Variables without a
-// matching secret are left unchanged.
-func InjectSecrets(envFilePath string, secrets []Secret) error {
-	data, err := os.ReadFile(envFilePath)
+// WriteSecretsEnv reads a secrets.env template file (containing ${VAR} placeholders),
+// resolves the placeholders with actual secret values, and writes the result back.
+// The secrets.env file is never committed to git. It is written by the agent
+// right before docker compose up, using values fetched from the dashboard API.
+func WriteSecretsEnv(secretsEnvPath string, secrets []Secret) error {
+	data, err := os.ReadFile(secretsEnvPath)
 	if err != nil {
-		return fmt.Errorf("reading env file %s: %w", envFilePath, err)
+		return fmt.Errorf("reading secrets.env template %s: %w", secretsEnvPath, err)
 	}
 
 	secretMap := make(map[string]string, len(secrets))
@@ -94,10 +95,10 @@ func InjectSecrets(envFilePath string, secrets []Secret) error {
 		return nil
 	}
 
-	if err := os.WriteFile(envFilePath, []byte(resolved), 0600); err != nil {
-		return fmt.Errorf("writing resolved env file %s: %w", envFilePath, err)
+	if err := os.WriteFile(secretsEnvPath, []byte(resolved), 0600); err != nil {
+		return fmt.Errorf("writing secrets.env %s: %w", secretsEnvPath, err)
 	}
 
-	slog.Info("injected secrets into env file", "path", envFilePath, "count", injected)
+	slog.Info("wrote secrets.env", "path", secretsEnvPath, "count", injected)
 	return nil
 }
