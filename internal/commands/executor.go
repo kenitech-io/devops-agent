@@ -504,7 +504,12 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 		if !compNameRe.MatchString(name) {
 			return nil, fmt.Errorf("INVALID_PARAMS: invalid component name %q", name)
 		}
-		return exec.CommandContext(ctx, "docker", "compose", "-p", name, "down", "--remove-orphans"), nil
+		args := []string{"compose", "-p", name, "down", "--remove-orphans"}
+		volumes, _ := extractOptionalBoolParam(params, "volumes")
+		if volumes {
+			args = append(args, "--volumes")
+		}
+		return exec.CommandContext(ctx, "docker", args...), nil
 
 	case "deploy_periphery":
 		confirm, err := extractStringParam(params, "confirm")
@@ -601,6 +606,22 @@ func intFromMap(m map[string]json.RawMessage, key string) (int, error) {
 		return 0, fmt.Errorf("param %q must be a number", key)
 	}
 	return int(val), nil
+}
+
+func extractOptionalBoolParam(params json.RawMessage, key string) (bool, error) {
+	m, err := parseParams(params)
+	if err != nil {
+		return false, err
+	}
+	raw, ok := m[key]
+	if !ok {
+		return false, nil
+	}
+	var val bool
+	if err := json.Unmarshal(raw, &val); err != nil {
+		return false, fmt.Errorf("param %q must be a boolean", key)
+	}
+	return val, nil
 }
 
 // Container name cache with TTL to avoid running docker ps on every command.
