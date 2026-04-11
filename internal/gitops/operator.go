@@ -227,31 +227,32 @@ func (o *Operator) Run(ctx context.Context) error {
 
 	slog.Info("repo cloned", "commit", hash[:8])
 
-	// Phase 2: Initial apply
-	// Stream output to any sync waiters (e.g. gitops_sync sent during clone)
-	// so the dashboard sees real-time docker compose progress.
+	// Phase 2: Initial apply or drift check.
+	// If the hash cache has entries, this is a restart (not first deploy).
+	// Skip full apply and only fix drifted components.
 	pf := o.collectProgressFn()
-	if pf != nil {
-		pf("--- initial deploy ---")
-	}
-	applyErr := o.applyAll(ctx, pf)
-	if applyErr != nil {
-		slog.Error("initial apply failed", "error", applyErr)
-		// Continue running, will retry on next poll
+	if HasCachedHashes() {
+		slog.Info("hash cache found, skipping initial apply")
+		o.setStatus("synced", "")
+	} else {
+		if pf != nil {
+			pf("--- initial deploy ---")
+		}
+		applyErr := o.applyAll(ctx, pf)
+		if applyErr != nil {
+			slog.Error("initial apply failed", "error", applyErr)
+		}
 	}
 
 	// Build result with component details from the apply.
 	o.mu.RLock()
 	initResult := SyncResult{
 		CommitHash: hash,
-		Updated:    true,
+		Updated:    HasCachedHashes(),
 		Components: o.components,
 		DurationMs: time.Since(o.lastSync).Milliseconds(),
 	}
 	o.mu.RUnlock()
-	if applyErr != nil {
-		initResult.Error = applyErr.Error()
-	}
 
 	// Notify any waiters that the initial deploy is done.
 	o.notifySyncDone(initResult)

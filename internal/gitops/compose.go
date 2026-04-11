@@ -41,11 +41,42 @@ type ComponentResult struct {
 }
 
 // composeHashCache tracks the SHA-256 of each component's compose file
-// to skip reapplying unchanged components.
+// to skip reapplying unchanged components. Persisted to disk so agent
+// restarts (e.g. updates) don't cause unnecessary full redeploys.
 var (
-	composeHashMu sync.Mutex
-	composeHashes = make(map[string]string) // dir path -> sha256 hex
+	composeHashMu   sync.Mutex
+	composeHashes   = make(map[string]string) // dir path -> sha256 hex
+	hashCachePath   string                    // set via InitHashCache
 )
+
+// InitHashCache loads the persisted hash cache from disk.
+// Call once at startup before any ApplyComponent calls.
+func InitHashCache(path string) {
+	composeHashMu.Lock()
+	defer composeHashMu.Unlock()
+	hashCachePath = path
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	_ = json.Unmarshal(data, &composeHashes)
+	slog.Info("loaded hash cache", "entries", len(composeHashes), "path", path)
+}
+
+// persistHashCache writes the current hash cache to disk.
+func persistHashCache() {
+	if hashCachePath == "" {
+		return
+	}
+	data, err := json.Marshal(composeHashes)
+	if err != nil {
+		slog.Warn("failed to marshal hash cache", "error", err)
+		return
+	}
+	if err := os.WriteFile(hashCachePath, data, 0600); err != nil {
+		slog.Warn("failed to persist hash cache", "error", err)
+	}
+}
 
 // composeFileHash returns the SHA-256 hex of the docker-compose.yml + env files in dir.
 func composeFileHash(dir string) (string, error) {
@@ -166,6 +197,7 @@ func ApplyComponent(ctx context.Context, dir string, progressFn ...ProgressFunc)
 	if hashErr == nil {
 		composeHashMu.Lock()
 		composeHashes[dir] = newHash
+		persistHashCache()
 		composeHashMu.Unlock()
 	}
 
@@ -177,10 +209,18 @@ func ApplyComponent(ctx context.Context, dir string, progressFn ...ProgressFunc)
 	return result
 }
 
+// HasCachedHashes returns true if the hash cache has entries (i.e. not a fresh install).
+func HasCachedHashes() bool {
+	composeHashMu.Lock()
+	defer composeHashMu.Unlock()
+	return len(composeHashes) > 0
+}
+
 // ClearHashCache removes all cached compose file hashes, forcing a full redeploy on next apply.
 func ClearHashCache() {
 	composeHashMu.Lock()
 	composeHashes = make(map[string]string)
+	persistHashCache()
 	composeHashMu.Unlock()
 }
 

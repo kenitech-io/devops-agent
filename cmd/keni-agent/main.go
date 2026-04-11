@@ -247,6 +247,7 @@ func runAgent(ctx context.Context, cfg *config.Config, wsClientPtr **ws.Client, 
 			})
 		}
 
+		gitops.InitHashCache(filepath.Join(filepath.Dir(config.GitOpsDataDir), "hash-cache.json"))
 		gitopsOp = gitops.NewOperator(repo, serverRole)
 		gitopsOp.SetSecretsConfig(&gitops.SecretsConfig{
 			DashboardURL: cfg.DashboardURL,
