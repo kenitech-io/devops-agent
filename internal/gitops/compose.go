@@ -60,7 +60,35 @@ func composeFileHash(dir string) (string, error) {
 	h.Write(configData)
 	secretsData, _ := os.ReadFile(filepath.Join(dir, "secrets.env"))
 	h.Write(secretsData)
+	predeployData, _ := os.ReadFile(filepath.Join(dir, "predeploy.sh"))
+	h.Write(predeployData)
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// runPredeploy executes a predeploy.sh script in the component directory if present.
+// Runs before docker compose up. Non-zero exit fails the component.
+func runPredeploy(ctx context.Context, dir string, pf ProgressFunc) error {
+	script := filepath.Join(dir, "predeploy.sh")
+	if _, err := os.Stat(script); err != nil {
+		return nil
+	}
+	name := filepath.Base(dir)
+	slog.Info("running predeploy", "name", name, "script", script)
+	if pf != nil {
+		pf(fmt.Sprintf("[%s] running predeploy.sh", name))
+	}
+	cmd := exec.CommandContext(ctx, "/bin/sh", script)
+	cmd.Dir = dir
+
+	var compPf ProgressFunc
+	if pf != nil {
+		compPf = func(line string) {
+			pf(fmt.Sprintf("[%s] %s", name, line))
+		}
+	}
+
+	_, err := runStreamingCmd(cmd, compPf)
+	return err
 }
 
 // ApplyComponent runs docker compose up -d in the given component directory.
@@ -93,6 +121,17 @@ func ApplyComponent(ctx context.Context, dir string, progressFn ...ProgressFunc)
 			result.Status = "running"
 			return result
 		}
+	}
+
+	// Run predeploy hook if present
+	if err := runPredeploy(ctx, dir, pf); err != nil {
+		result.Status = "error"
+		result.Error = fmt.Sprintf("predeploy failed: %s", err)
+		slog.Error("predeploy failed", "name", name, "error", err)
+		if pf != nil {
+			pf(fmt.Sprintf("[%s] ERROR predeploy: %s", name, err))
+		}
+		return result
 	}
 
 	args := composeArgs(dir, "up", "-d", "--pull", "always", "--remove-orphans")
