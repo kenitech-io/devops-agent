@@ -332,6 +332,17 @@ func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
 		result.CommitHash = hash
 	}
 
+	// Phase 2b: Re-inject secrets after pull.
+	// git reset --hard overwrites secrets.env with ${VAR} placeholders from git.
+	// We must re-inject real values before any compose apply or hash computation.
+	newDirs, _ := o.repo.ComponentDirs(o.role)
+	if len(newDirs) > 0 {
+		if err := o.injectSecrets(newDirs); err != nil {
+			slog.Warn("secret injection after pull had errors", "error", err)
+			emit(fmt.Sprintf("WARNING: secret injection: %s", err))
+		}
+	}
+
 	// Phase 3: Check if this commit was previously marked as bad
 	o.mu.RLock()
 	isBadCommit := o.badCommit != "" && o.badCommit == hash
