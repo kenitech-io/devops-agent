@@ -531,6 +531,12 @@ func (o *Operator) checkAndRemediateDrift(ctx context.Context, progressFn Progre
 		}
 	}
 
+	// Ensure secrets are injected before any drift remediation.
+	// git reset --hard may have restored ${VAR} placeholders.
+	if err := o.injectSecrets(dirs); err != nil {
+		slog.Warn("secret injection before drift check had errors", "error", err)
+	}
+
 	for _, dir := range dirs {
 		info, err := DriftCheck(ctx, dir)
 		if err != nil {
