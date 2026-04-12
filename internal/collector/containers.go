@@ -71,8 +71,12 @@ func CollectContainers() ([]ws.ContainerInfo, error) {
 			info.MemoryUsageMb, info.MemoryLimitMb = parseMemUsage(stats.MemUsage)
 		}
 
-		// Collect Traefik labels for URL auto-discovery
-		info.Labels = collectTraefikLabels(ps.ID)
+		// Collect extended info from docker inspect (labels, networks, ports, mounts)
+		extInfo := collectExtendedInfo(ps.ID)
+		info.Labels = extInfo.labels
+		info.Networks = extInfo.networks
+		info.Ports = extInfo.ports
+		info.Mounts = extInfo.mounts
 
 		containers = append(containers, info)
 	}
@@ -80,34 +84,101 @@ func CollectContainers() ([]ws.ContainerInfo, error) {
 	return containers, nil
 }
 
-// collectTraefikLabels extracts Traefik routing labels from a container.
-// Only returns labels starting with "traefik.http.routers." to keep payload small.
-func collectTraefikLabels(containerID string) map[string]string {
-	out, err := exec.Command("docker", "inspect", "--format", "{{json .Config.Labels}}", containerID).Output()
+type extendedInfo struct {
+	labels   map[string]string
+	networks []string
+	ports    []ws.PortMapping
+	mounts   []ws.MountInfo
+}
+
+// collectExtendedInfo extracts labels, networks, ports, and mounts from docker inspect.
+func collectExtendedInfo(containerID string) extendedInfo {
+	out, err := exec.Command("docker", "inspect", containerID).Output()
 	if err != nil {
-		return nil
+		return extendedInfo{}
 	}
 
-	var allLabels map[string]string
-	if err := json.Unmarshal(out, &allLabels); err != nil {
-		return nil
+	var inspectResult []struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+		NetworkSettings struct {
+			Networks map[string]struct{} `json:"Networks"`
+			Ports    map[string][]struct {
+				HostIP   string `json:"HostIp"`
+				HostPort string `json:"HostPort"`
+			} `json:"Ports"`
+		} `json:"NetworkSettings"`
+		Mounts []struct {
+			Type        string `json:"Type"`
+			Source      string `json:"Source"`
+			Destination string `json:"Destination"`
+		} `json:"Mounts"`
 	}
 
-	// Filter to only Traefik routing labels
-	result := make(map[string]string)
-	for k, v := range allLabels {
-		if strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".rule") {
-			result[k] = v
+	if err := json.Unmarshal(out, &inspectResult); err != nil || len(inspectResult) == 0 {
+		return extendedInfo{}
+	}
+
+	info := extendedInfo{}
+	inspect := inspectResult[0]
+
+	// Labels: filter to Traefik routing + keni labels
+	if len(inspect.Config.Labels) > 0 {
+		filtered := make(map[string]string)
+		for k, v := range inspect.Config.Labels {
+			if strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".rule") {
+				filtered[k] = v
+			}
+			if k == "traefik.enable" {
+				filtered[k] = v
+			}
+			if strings.HasPrefix(k, "keni.") {
+				filtered[k] = v
+			}
+			if strings.HasPrefix(k, "com.docker.compose.") {
+				filtered[k] = v
+			}
 		}
-		if k == "traefik.enable" {
-			result[k] = v
+		if len(filtered) > 0 {
+			info.labels = filtered
 		}
 	}
 
-	if len(result) == 0 {
-		return nil
+	// Networks
+	for name := range inspect.NetworkSettings.Networks {
+		info.networks = append(info.networks, name)
 	}
-	return result
+
+	// Ports
+	for portProto, bindings := range inspect.NetworkSettings.Ports {
+		parts := strings.SplitN(portProto, "/", 2)
+		containerPort := parts[0]
+		protocol := "tcp"
+		if len(parts) > 1 {
+			protocol = parts[1]
+		}
+		for _, binding := range bindings {
+			if binding.HostPort != "" {
+				info.ports = append(info.ports, ws.PortMapping{
+					HostPort:      binding.HostPort,
+					ContainerPort: containerPort,
+					Protocol:      protocol,
+				})
+			}
+		}
+	}
+
+	// Mounts
+	for _, m := range inspect.Mounts {
+		info.mounts = append(info.mounts, ws.MountInfo{
+			Source: m.Source,
+			Target: m.Destination,
+			Type:   m.Type,
+		})
+	}
+
+	return info
 }
 
 func collectStats() map[string]dockerStatsEntry {

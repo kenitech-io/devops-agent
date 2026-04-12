@@ -70,6 +70,23 @@ type ContainerInfo struct {
 	MemoryLimitMb float64           `json:"memoryLimitMb"`
 	Uptime        int64             `json:"uptime"`
 	Labels        map[string]string `json:"labels,omitempty"`
+	Networks      []string          `json:"networks,omitempty"`
+	Ports         []PortMapping     `json:"ports,omitempty"`
+	Mounts        []MountInfo       `json:"mounts,omitempty"`
+}
+
+// PortMapping describes a published container port.
+type PortMapping struct {
+	HostPort      string `json:"hostPort"`
+	ContainerPort string `json:"containerPort"`
+	Protocol      string `json:"protocol"`
+}
+
+// MountInfo describes a container volume mount.
+type MountInfo struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Type   string `json:"type"` // "volume", "bind", "tmpfs"
 }
 
 // BackupInfo describes backup status.
