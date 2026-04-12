@@ -112,7 +112,7 @@ func (o *Operator) Diff(ctx context.Context, componentFilter []string) (*DiffRes
 
 	// Detect orphans: compose projects running on the server but not in git.
 	if len(filterSet) == 0 {
-		orphans := listOrphanProjects(ctx, desiredNames, o.role)
+		orphans := ListOrphanProjects(ctx, desiredNames)
 		for _, name := range orphans {
 			result.Components = append(result.Components, ComponentDiff{
 				Name:   name,
@@ -125,9 +125,22 @@ func (o *Operator) Diff(ctx context.Context, componentFilter []string) (*DiffRes
 	return result, nil
 }
 
-// listOrphanProjects finds compose projects running on the server that are
-// not present in the git repo for this role.
-func listOrphanProjects(ctx context.Context, desired map[string]bool, role string) []string {
+// KnownComponents is the set of IDP component compose project names managed
+// by the agent. Used to identify orphaned containers without false positives
+// on unrelated compose projects.
+var KnownComponents = map[string]bool{
+	"traefik":          true,
+	"komodo-core":      true,
+	"komodo-periphery": true,
+	"monitoring":       true,
+	"woodpecker":       true,
+	"registry":         true,
+	"backup":           true,
+}
+
+// ListOrphanProjects finds compose projects running on the server that are
+// known IDP components but not in the desired state from git.
+func ListOrphanProjects(ctx context.Context, desired map[string]bool) []string {
 	cmd := exec.CommandContext(ctx, "docker", "compose", "ls", "--format", "json")
 	out, err := cmd.Output()
 	if err != nil {
@@ -139,19 +152,11 @@ func listOrphanProjects(ctx context.Context, desired map[string]bool, role strin
 		return nil
 	}
 
-	// Role prefix used in compose project names (e.g. "core-traefik", "prod-backup").
-	prefix := strings.ToLower(role) + "-"
-
 	var orphans []string
 	for _, e := range entries {
 		name := strings.ToLower(e.Name)
-		// Only consider projects that match this server's role.
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		compName := strings.TrimPrefix(name, prefix)
-		if !desired[compName] {
-			orphans = append(orphans, compName)
+		if KnownComponents[name] && !desired[name] {
+			orphans = append(orphans, name)
 		}
 	}
 	return orphans

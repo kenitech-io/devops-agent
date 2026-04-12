@@ -389,6 +389,17 @@ func (o *Operator) pollAndApply(ctx context.Context, progressFn ProgressFunc) {
 		}
 	}
 
+	// Phase 5b: Stop orphaned compose projects. Catches containers that
+	// survived a failed stop or were never in the pre-pull state.
+	orphans := ListOrphanProjects(ctx, newSet)
+	for _, name := range orphans {
+		slog.Info("orphaned compose project detected, stopping", "name", name, "role", o.role)
+		emit(fmt.Sprintf("--- stopping orphan: %s ---", name))
+		if err := StopComponentByProject(ctx, name, progressFn); err != nil {
+			slog.Error("failed to stop orphan", "name", name, "error", err)
+		}
+	}
+
 	// Phase 6: Apply current components if repo changed
 	if updated {
 		slog.Info("repo changed, applying", "commit", hash[:8])
