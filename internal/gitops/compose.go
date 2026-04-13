@@ -79,6 +79,10 @@ func persistHashCache() {
 }
 
 // composeFileHash returns the SHA-256 hex of the docker-compose.yml + env files in dir.
+// secrets.env is excluded: its contents are rewritten at apply time by injectSecrets
+// (resolving ${VAR} placeholders), then `git reset --hard` on the next pull reverts
+// it back to the placeholder version. Including it would flag every component as
+// drifted after any apply.
 func composeFileHash(dir string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "docker-compose.yml"))
 	if err != nil {
@@ -86,11 +90,8 @@ func composeFileHash(dir string) (string, error) {
 	}
 	h := sha256.New()
 	h.Write(data)
-	// Include config.env and secrets.env if they exist
 	configData, _ := os.ReadFile(filepath.Join(dir, "config.env"))
 	h.Write(configData)
-	secretsData, _ := os.ReadFile(filepath.Join(dir, "secrets.env"))
-	h.Write(secretsData)
 	predeployData, _ := os.ReadFile(filepath.Join(dir, "predeploy.sh"))
 	h.Write(predeployData)
 	return hex.EncodeToString(h.Sum(nil)), nil
