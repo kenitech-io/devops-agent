@@ -3,6 +3,7 @@ package commands
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -16,8 +17,8 @@ var errUFWStatusSpecial = errors.New("ufw_status: handled specially")
 // operators can spot drift between declared and actual state.
 type UFWExpectedRule struct {
 	Port    string `json:"port"`
-	Proto   string `json:"proto"`            // "tcp" | "udp"
-	From    string `json:"from"`             // "Anywhere" or CIDR
+	Proto   string `json:"proto"`   // "tcp" | "udp"
+	From    string `json:"from"`    // "Anywhere" or CIDR
 	Purpose string `json:"purpose"`
 }
 
@@ -32,11 +33,11 @@ var ExpectedUFWRules = []UFWExpectedRule{
 	{Port: "3100", Proto: "tcp", From: "10.99.0.0/24", Purpose: "loki"},
 }
 
-// UFWActualRule is a parsed line from `ufw status`.
+// UFWActualRule is a parsed tuple line from /etc/ufw/user.rules.
 type UFWActualRule struct {
 	Port   string `json:"port"`
 	Proto  string `json:"proto"`
-	Action string `json:"action"` // "ALLOW" | "DENY" | "REJECT"
+	Action string `json:"action"` // "ALLOW" | "DENY" | "REJECT" | "LIMIT"
 	From   string `json:"from"`
 }
 
@@ -47,74 +48,114 @@ type UFWStatusResult struct {
 	RawOutput string            `json:"rawOutput"`
 	Actual    []UFWActualRule   `json:"actual"`
 	Expected  []UFWExpectedRule `json:"expected"`
-	// Matched: expected rules present in actual.
-	Matched []UFWExpectedRule `json:"matched"`
-	// Missing: expected but not present in actual.
-	Missing []UFWExpectedRule `json:"missing"`
-	// Extra: actual rules not in the expected set (worth auditing).
-	Extra []UFWActualRule `json:"extra"`
+	Matched   []UFWExpectedRule `json:"matched"`
+	Missing   []UFWExpectedRule `json:"missing"`
+	Extra     []UFWActualRule   `json:"extra"`
 }
 
-// ufwRuleLine matches lines like "22/tcp   ALLOW IN   Anywhere" and
-// "9100/tcp   ALLOW IN   10.99.0.0/24".
-var ufwRuleLine = regexp.MustCompile(`^\s*(\d+)/(tcp|udp)\s+(ALLOW|DENY|REJECT|LIMIT)(?:\s+IN)?\s+(.+?)\s*$`)
+// tuple format in /etc/ufw/user.rules:
+//
+//	### tuple ### allow tcp 9100 0.0.0.0/0 any 10.99.0.0/24 in
+//	               [1]   [2] [3]  [4]    [5]  [6]         [7]
+var ufwTupleRe = regexp.MustCompile(`^###\s+tuple\s+###\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)`)
+
+// sudoCat reads a root-owned file via sudo. The keni user has NOPASSWD sudo
+// from install.sh, and this avoids the ufw(1) lockfile which /run read-only
+// under ProtectSystem=strict blocks.
+func sudoCat(path string) (string, error) {
+	out, err := exec.Command("sudo", "-n", "cat", path).Output()
+	if err != nil {
+		return "", fmt.Errorf("sudo cat %s: %w", path, err)
+	}
+	return string(out), nil
+}
+
+func parseUFWConfEnabled(conf string) bool {
+	for _, line := range strings.Split(conf, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "ENABLED=") {
+			val := strings.Trim(strings.TrimPrefix(trimmed, "ENABLED="), "\"'")
+			return strings.EqualFold(val, "yes")
+		}
+	}
+	return false
+}
+
+func parseUFWRules(rules string) []UFWActualRule {
+	var out []UFWActualRule
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(rules, "\n") {
+		m := ufwTupleRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		action := strings.ToUpper(m[1])
+		proto := m[2]
+		port := m[3]
+		// m[4] is daddr (destination), m[5] is sport, m[6] is saddr (source).
+		// `ufw allow from X to any port Y` records saddr=X, daddr=0.0.0.0/0.
+		// `ufw allow Y/proto` records saddr=0.0.0.0/0, daddr=0.0.0.0/0.
+		saddr := m[6]
+		from := saddr
+		if saddr == "0.0.0.0/0" || saddr == "::/0" {
+			from = "Anywhere"
+		}
+		key := port + "/" + proto + "/" + action + "/" + from
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, UFWActualRule{
+			Port:   port,
+			Proto:  proto,
+			Action: action,
+			From:   from,
+		})
+	}
+	return out
+}
 
 func executeUFWStatus(start time.Time) (*Result, error) {
 	if _, err := exec.LookPath("ufw"); err != nil {
 		data, _ := json.Marshal(UFWStatusResult{
 			Installed: false,
 			Expected:  ExpectedUFWRules,
+			Actual:    []UFWActualRule{},
+			Matched:   []UFWExpectedRule{},
+			Missing:   []UFWExpectedRule{},
+			Extra:     []UFWActualRule{},
 		})
 		return &Result{ExitCode: 0, Stdout: string(data), DurationMs: time.Since(start).Milliseconds()}, nil
 	}
 
-	// `ufw status` requires root; agent runs as the keni user. The installer
-	// grants keni NOPASSWD sudo, so -n keeps this non-interactive and the
-	// call still fails cleanly if sudo is ever locked down.
-	out, _ := exec.Command("sudo", "-n", "ufw", "status").CombinedOutput()
-	raw := string(out)
-
 	result := UFWStatusResult{
 		Installed: true,
-		RawOutput: raw,
 		Expected:  ExpectedUFWRules,
-		// Non-nil slices so the JSON encoder emits [] rather than null,
-		// which the dashboard expects when calling .length / .some.
-		Actual:  []UFWActualRule{},
-		Matched: []UFWExpectedRule{},
-		Missing: []UFWExpectedRule{},
-		Extra:   []UFWActualRule{},
+		Actual:    []UFWActualRule{},
+		Matched:   []UFWExpectedRule{},
+		Missing:   []UFWExpectedRule{},
+		Extra:     []UFWActualRule{},
 	}
 
-	for _, line := range strings.Split(raw, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "Status:") {
-			result.Enabled = strings.Contains(trimmed, "active")
-			continue
-		}
-		m := ufwRuleLine.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		result.Actual = append(result.Actual, UFWActualRule{
-			Port:   m[1],
-			Proto:  m[2],
-			Action: m[3],
-			From:   strings.TrimSpace(m[4]),
-		})
+	conf, confErr := sudoCat("/etc/ufw/ufw.conf")
+	if confErr == nil {
+		result.Enabled = parseUFWConfEnabled(conf)
 	}
 
-	// Diff expected vs actual. An expected rule matches if ANY actual rule
-	// has the same (port, proto, from). Public-facing rules accept "Anywhere"
-	// as well as the IPv4-only variant ufw sometimes emits.
+	rules, rulesErr := sudoCat("/etc/ufw/user.rules")
+	if rulesErr == nil {
+		result.Actual = parseUFWRules(rules)
+		result.RawOutput = rules
+	} else {
+		result.RawOutput = fmt.Sprintf("failed to read /etc/ufw/user.rules: %s", rulesErr)
+	}
+
+	// Diff expected vs actual.
 	isMatch := func(e UFWExpectedRule, a UFWActualRule) bool {
-		if e.Port != a.Port || e.Proto != a.Proto || a.Action != "ALLOW" {
-			return false
-		}
-		if e.From == "Anywhere" {
-			return a.From == "Anywhere" || a.From == "Anywhere (v6)"
-		}
-		return a.From == e.From
+		return e.Port == a.Port && e.Proto == a.Proto && a.Action == "ALLOW" && a.From == e.From
 	}
 
 	usedActual := make([]bool, len(result.Actual))
