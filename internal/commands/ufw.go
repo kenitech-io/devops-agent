@@ -95,13 +95,21 @@ func parseUFWRules(rules string) []UFWActualRule {
 		action := strings.ToUpper(m[1])
 		proto := m[2]
 		port := m[3]
-		// m[4] is daddr (destination), m[5] is sport, m[6] is saddr (source).
-		// `ufw allow from X to any port Y` records saddr=X, daddr=0.0.0.0/0.
-		// `ufw allow Y/proto` records saddr=0.0.0.0/0, daddr=0.0.0.0/0.
+		// m[4] daddr, m[5] sport, m[6] saddr, m[7] direction/iface.
 		saddr := m[6]
+		direction := m[7]
 		from := saddr
 		if saddr == "0.0.0.0/0" || saddr == "::/0" {
 			from = "Anywhere"
+		}
+		// direction is "in", "out", or "in_<iface>" / "out_<iface>". When
+		// an interface is named, scope the rule to that interface in the
+		// display so a "0.0.0.0/0 in_tailscale0" rule doesn't look like a
+		// public allow-any.
+		if strings.HasPrefix(direction, "in_") {
+			from = from + " on " + strings.TrimPrefix(direction, "in_")
+		} else if strings.HasPrefix(direction, "out_") {
+			from = from + " out " + strings.TrimPrefix(direction, "out_")
 		}
 		key := port + "/" + proto + "/" + action + "/" + from
 		if seen[key] {
