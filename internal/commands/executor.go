@@ -76,6 +76,9 @@ func Execute(ctx context.Context, action string, params json.RawMessage) (*Resul
 	if errors.Is(err, errSystemInfoSpecial) {
 		return executeSystemInfo(start)
 	}
+	if errors.Is(err, errUFWStatusSpecial) {
+		return executeUFWStatus(start)
+	}
 	if scheduled, ok := err.(errScheduledAction); ok {
 		return &Result{
 			ExitCode:   0,
@@ -427,6 +430,9 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 
 	case "wireguard_status":
 		return exec.CommandContext(ctx, "wg", "show"), nil
+
+	case "ufw_status":
+		return nil, errUFWStatusSpecial
 
 	case "docker_logs":
 		name, err := extractStringParam(params, "name")
