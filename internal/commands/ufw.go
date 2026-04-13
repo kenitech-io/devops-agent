@@ -75,6 +75,12 @@ func executeUFWStatus(start time.Time) (*Result, error) {
 		Installed: true,
 		RawOutput: raw,
 		Expected:  ExpectedUFWRules,
+		// Non-nil slices so the JSON encoder emits [] rather than null,
+		// which the dashboard expects when calling .length / .some.
+		Actual:  []UFWActualRule{},
+		Matched: []UFWExpectedRule{},
+		Missing: []UFWExpectedRule{},
+		Extra:   []UFWActualRule{},
 	}
 
 	for _, line := range strings.Split(raw, "\n") {
