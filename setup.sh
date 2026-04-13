@@ -141,7 +141,11 @@ apply_hardening() {
         log "SSH hardened: root login via key only, password auth disabled"
     fi
 
-    # Firewall: allow SSH + HTTP + HTTPS + WireGuard
+    # Firewall: public ports (SSH + HTTP + HTTPS + WireGuard) plus monitoring
+    # collectors scoped to the 10.99.0.0/24 overlay only.
+    # node-exporter:9100, cadvisor:8080, loki:3100 must be reachable between
+    # peers so prometheus on CORE can scrape and promtail can push to loki.
+    WG_SUBNET="10.99.0.0/24"
     if command -v ufw >/dev/null 2>&1; then
         ufw --force reset >/dev/null 2>&1
         ufw default deny incoming >/dev/null
@@ -150,15 +154,19 @@ apply_hardening() {
         ufw allow 80/tcp >/dev/null    # HTTP
         ufw allow 443/tcp >/dev/null   # HTTPS
         ufw allow 51820/udp >/dev/null # WireGuard
+        ufw allow from "$WG_SUBNET" to any port 9100 proto tcp >/dev/null  # node-exporter
+        ufw allow from "$WG_SUBNET" to any port 8080 proto tcp >/dev/null  # cadvisor
+        ufw allow from "$WG_SUBNET" to any port 3100 proto tcp >/dev/null  # loki
         ufw --force enable >/dev/null
-        log "UFW firewall configured: SSH, HTTP, HTTPS, WireGuard"
+        log "UFW firewall configured: SSH, HTTP, HTTPS, WireGuard, overlay-scoped collectors"
     elif command -v firewall-cmd >/dev/null 2>&1; then
         firewall-cmd --permanent --add-service=ssh >/dev/null
         firewall-cmd --permanent --add-service=http >/dev/null
         firewall-cmd --permanent --add-service=https >/dev/null
         firewall-cmd --permanent --add-port=51820/udp >/dev/null
+        firewall-cmd --permanent --zone=trusted --add-source="$WG_SUBNET" >/dev/null
         firewall-cmd --reload >/dev/null
-        log "Firewalld configured: SSH, HTTP, HTTPS, WireGuard"
+        log "Firewalld configured: SSH, HTTP, HTTPS, WireGuard, $WG_SUBNET in trusted zone"
     else
         log "No firewall found (ufw/firewalld), skipping"
     fi
