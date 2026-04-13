@@ -68,7 +68,10 @@ func executeUFWStatus(start time.Time) (*Result, error) {
 		return &Result{ExitCode: 0, Stdout: string(data), DurationMs: time.Since(start).Milliseconds()}, nil
 	}
 
-	out, _ := exec.Command("ufw", "status").CombinedOutput()
+	// `ufw status` requires root; agent runs as the keni user. The installer
+	// grants keni NOPASSWD sudo, so -n keeps this non-interactive and the
+	// call still fails cleanly if sudo is ever locked down.
+	out, _ := exec.Command("sudo", "-n", "ufw", "status").CombinedOutput()
 	raw := string(out)
 
 	result := UFWStatusResult{
