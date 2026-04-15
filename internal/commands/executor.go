@@ -349,10 +349,37 @@ func ExecuteStream(ctx context.Context, action string, params json.RawMessage, o
 // IsStreamingAction returns true if the action should use streaming output.
 func IsStreamingAction(action string) bool {
 	switch action {
-	case "backup_trigger", "backup_restore":
+	case "backup_trigger", "backup_restore", "backup_check", "backup_prune":
 		return true
 	}
 	return false
+}
+
+// resticContainerParam extracts an optional container name for backup_* actions.
+// Defaults to "keni-backup" for backwards compatibility.
+func resticContainerParam(params json.RawMessage) (string, error) {
+	if len(params) == 0 || string(params) == "null" {
+		return "keni-backup", nil
+	}
+	m, err := parseParams(params)
+	if err != nil {
+		return "", err
+	}
+	raw, ok := m["container"]
+	if !ok {
+		return "keni-backup", nil
+	}
+	var name string
+	if err := json.Unmarshal(raw, &name); err != nil {
+		return "", fmt.Errorf("param \"container\" must be a string")
+	}
+	if name == "" {
+		return "keni-backup", nil
+	}
+	if !containerNameRe.MatchString(name) {
+		return "", fmt.Errorf("invalid container name %q", name)
+	}
+	return name, nil
 }
 
 // buildCommand creates the exec.Cmd for a whitelisted action with validated params.
@@ -388,10 +415,18 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 		return exec.CommandContext(ctx, "docker", "restart", name), nil
 
 	case "backup_snapshots":
-		return exec.CommandContext(ctx, "docker", "exec", "keni-backup", "restic", "snapshots", "--json"), nil
+		container, err := resticContainerParam(params)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		return exec.CommandContext(ctx, "docker", "exec", container, "restic", "snapshots", "--json"), nil
 
 	case "backup_stats":
-		return exec.CommandContext(ctx, "docker", "exec", "keni-backup", "restic", "stats", "--json"), nil
+		container, err := resticContainerParam(params)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		return exec.CommandContext(ctx, "docker", "exec", container, "restic", "stats", "--json"), nil
 
 	case "backup_restore":
 		snapshotID, err := extractStringParam(params, "snapshotId")
@@ -401,12 +436,71 @@ func buildCommand(ctx context.Context, action string, params json.RawMessage) (*
 		if snapshotID == "" {
 			return nil, fmt.Errorf("INVALID_PARAMS: snapshotId parameter required")
 		}
-		// Run restic restore inside the backup container
-		return exec.CommandContext(ctx, "docker", "exec", "keni-backup",
+		container, err := resticContainerParam(params)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		return exec.CommandContext(ctx, "docker", "exec", container,
 			"restic", "restore", snapshotID, "--target", "/restore"), nil
 
 	case "backup_trigger":
-		return exec.CommandContext(ctx, "docker", "start", "-a", "keni-backup"), nil
+		container, err := resticContainerParam(params)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		return exec.CommandContext(ctx, "docker", "start", "-a", container), nil
+
+	case "backup_unlock":
+		container, err := resticContainerParam(params)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		return exec.CommandContext(ctx, "docker", "exec", container, "restic", "unlock"), nil
+
+	case "backup_check":
+		container, err := resticContainerParam(params)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		// --read-data-subset=5% samples 5% of pack files; cheap enough to run on demand.
+		return exec.CommandContext(ctx, "docker", "exec", container,
+			"restic", "check", "--read-data-subset=5%"), nil
+
+	case "backup_test_backend":
+		container, err := resticContainerParam(params)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		return exec.CommandContext(ctx, "docker", "exec", container, "restic", "cat", "config"), nil
+
+	case "backup_prune":
+		container, err := resticContainerParam(params)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		keepDaily, err := extractOptionalIntParam(params, "keepDaily", 7)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		keepWeekly, err := extractOptionalIntParam(params, "keepWeekly", 4)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		keepMonthly, err := extractOptionalIntParam(params, "keepMonthly", 6)
+		if err != nil {
+			return nil, fmt.Errorf("INVALID_PARAMS: %w", err)
+		}
+		if keepDaily < 0 || keepDaily > 365 ||
+			keepWeekly < 0 || keepWeekly > 104 ||
+			keepMonthly < 0 || keepMonthly > 120 {
+			return nil, fmt.Errorf("INVALID_PARAMS: retention out of range")
+		}
+		return exec.CommandContext(ctx, "docker", "exec", container,
+			"restic", "forget", "--prune",
+			"--keep-daily", strconv.Itoa(keepDaily),
+			"--keep-weekly", strconv.Itoa(keepWeekly),
+			"--keep-monthly", strconv.Itoa(keepMonthly),
+		), nil
 
 	case "system_disk":
 		return exec.CommandContext(ctx, "df", "-h"), nil
